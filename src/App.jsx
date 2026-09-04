@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import { supabase } from "./lib/supabase";
 import {
   LogIn, UserPlus, ArrowRight, ArrowLeft, Check, Pencil, Plus, Trash2,
   LogOut, Wallet, ChevronRight, AlertCircle, X, Settings, Search,
@@ -13,10 +14,11 @@ const monthKey = (d) => (d || "").slice(0, 7);
 const nowMonthKey = () => new Date().toISOString().slice(0, 7);
 const monthLabel = () =>
   new Date().toLocaleDateString("id-ID", { month: "long", year: "numeric" });
-const isExpenseTx = (t) => t.type !== "topup" && t.type !== "withdraw";
+const isExpenseTx = (t) => t.type !== "topup" && t.type !== "withdraw" && t.type !== "asset_topup" && !t.directAsset;
 const isTopupTx = (t) => t.type === "topup";
 const isWithdrawTx = (t) => t.type === "withdraw";
-const isDepositTx = (t) => t.type === "expense" || !t.type; // "setor" into an asset category
+const isAssetTopupTx = (t) => t.type === "asset_topup" || t.directAsset;
+const isDepositTx = (t) => t.type === "expense" || isAssetTopupTx(t) || !t.type; // "setor" into an asset category
 const monthLabelFor = (mKey) => {
   const [y, m] = mKey.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("id-ID", { month: "long", year: "numeric" });
@@ -137,7 +139,7 @@ function transactionsToCsv(user, transactions) {
     const sub = cat?.subs.find((s) => s.id === t.subId);
     rows.push([
       t.date,
-      isTopupTx(t) ? "Tambahan Dana" : "Pengeluaran",
+      isAssetTopupTx(t) ? "Saldo Aset" : isTopupTx(t) ? "Tambahan Dana" : "Pengeluaran",
       cat ? cat.name : "Seluruh Alokasi",
       sub ? sub.name : "",
       (t.note || "").replace(/"/g, '""'),
@@ -202,6 +204,7 @@ function ProgressBar({ percent, color }) {
 }
 
 function SpendingTrendChart({ transactions, currentMonth }) {
+  const [hoveredMonth, setHoveredMonth] = useState(null);
   const [currentYear, currentMonthNumber] = currentMonth.split("-").map(Number);
   const months = Array.from({ length: 3 }, (_, index) => {
     const date = new Date(currentYear, currentMonthNumber - 1 - (2 - index), 1);
@@ -209,6 +212,7 @@ function SpendingTrendChart({ transactions, currentMonth }) {
   });
   const values = months.map((month) => ({
     label: monthLabelFor(month),
+    shortLabel: new Date(`${month}-01T00:00:00`).toLocaleDateString("id-ID", { month: "short" }),
     total: transactions
       .filter((transaction) => monthKey(transaction.date) === month && isExpenseTx(transaction))
       .reduce((sum, transaction) => sum + Number(transaction.amount), 0),
@@ -216,24 +220,38 @@ function SpendingTrendChart({ transactions, currentMonth }) {
   const maxValue = Math.max(...values.map((value) => value.total), 1);
   const points = values.map((value, index) => ({
     ...value,
-    x: 45 + index * 130,
-    y: 100 - (value.total / maxValue) * 80,
+    x: 52 + index * 158,
+    y: 128 - (value.total / maxValue) * 92,
   }));
   const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+  const hoveredPoint = points.find((point) => point.label === hoveredMonth);
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="spending-trend-chart flex flex-col gap-3">
       <p className="muted text-xs uppercase tracking-wide">Tren Pengeluaran 3 Bulan</p>
-      <svg width="100%" height="145" viewBox="0 0 330 145" preserveAspectRatio="xMidYMid meet">
-        {[20, 60, 100].map((y) => <line key={y} x1="25" y1={y} x2="315" y2={y} stroke="var(--border)" strokeWidth="0.5" opacity="0.5" />)}
+      <svg width="100%" height="190" viewBox="0 0 420 190" preserveAspectRatio="xMidYMid meet" style={{ overflow: "visible" }}>
+        {[36, 82, 128].map((y) => <line key={y} x1="28" y1={y} x2="392" y2={y} stroke="var(--border)" strokeWidth="0.5" opacity="0.5" />)}
         <path d={path} fill="none" stroke="var(--gold)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
         {points.map((point) => (
-          <g key={point.label}>
-            <circle cx={point.x} cy={point.y} r="4" fill="var(--gold)" />
-            <text x={point.x} y="125" textAnchor="middle" fontSize="11" fill="var(--muted)">{point.label}</text>
-            <text x={point.x} y={Math.max(point.y - 9, 11)} textAnchor="middle" fontSize="10" fill="var(--text)" fontWeight="700">{rupiah(point.total).replace("Rp ", "")}</text>
+          <g
+            key={point.label}
+            onMouseEnter={() => setHoveredMonth(point.label)}
+            onMouseLeave={() => setHoveredMonth(null)}
+            style={{ cursor: "pointer" }}
+          >
+            <rect x={point.x - 48} y="16" width="96" height="128" fill="transparent" />
+            <circle cx={point.x} cy={point.y} r={hoveredMonth === point.label ? 6 : 4} fill="var(--gold)" stroke={hoveredMonth === point.label ? "var(--text)" : "none"} strokeWidth="1.5" />
+            <text x={point.x} y="158" textAnchor="middle" fontSize="11" fill="var(--muted)">{point.shortLabel}</text>
+            <title>{`${point.label}: ${rupiah(point.total)}`}</title>
           </g>
         ))}
+        {hoveredPoint && (
+          <g pointerEvents="none">
+            <rect x={hoveredPoint.x > 300 ? hoveredPoint.x - 142 : hoveredPoint.x + 10} y="12" width="132" height="40" rx="6" fill="var(--surface)" stroke="var(--gold)" />
+            <text x={hoveredPoint.x > 300 ? hoveredPoint.x - 132 : hoveredPoint.x + 20} y="28" fontSize="10" fill="var(--muted)">{hoveredPoint.label}</text>
+            <text x={hoveredPoint.x > 300 ? hoveredPoint.x - 132 : hoveredPoint.x + 20} y="44" fontSize="11" fill="var(--text)" fontWeight="700">{rupiah(hoveredPoint.total)}</text>
+          </g>
+        )}
       </svg>
     </div>
   );
@@ -241,6 +259,7 @@ function SpendingTrendChart({ transactions, currentMonth }) {
 
 /* Daily Spending Chart for CategoryDetail */
 function DailySpendingChart({ monthTx, monthKey }) {
+  const [hoveredDay, setHoveredDay] = useState(null);
   // Get last day of the month
   const [year, month] = monthKey.split("-").map(Number);
   const lastDay = new Date(year, month, 0).getDate();
@@ -255,28 +274,31 @@ function DailySpendingChart({ monthTx, monthKey }) {
     return { day, total: dayTotal };
   });
   const avgDaily = dailySpending.reduce((sum, day) => sum + day.total, 0) / lastDay;
-  const weeklyData = Array.from({ length: Math.ceil(lastDay / 7) }, (_, weekIdx) => {
-    const startDay = weekIdx * 7 + 1;
-    const endDay = Math.min(startDay + 6, lastDay);
-    const weekTotal = dailySpending
-      .slice(startDay - 1, endDay)
-      .reduce((s, d) => s + d.total, 0);
-    return {
-      week: `W${weekIdx + 1}`,
-      total: weekTotal,
-      days: `${startDay}-${endDay}`,
-    };
-  });
-  
-  const maxWeekly = Math.max(...weeklyData.map(w => w.total), 1);
+  const maxDaily = Math.max(...dailySpending.map((d) => d.total), 1);
   const chartHeight = 120;
-  const barWidth = 100 / weeklyData.length;
+  const chartLeft = 40;
+  const chartRight = 395;
+  const chartWidth = chartRight - chartLeft;
+  const points = dailySpending.map((item, index) => ({
+    ...item,
+    x: chartLeft + (index / Math.max(lastDay - 1, 1)) * chartWidth,
+    y: chartHeight - (item.total / maxDaily) * chartHeight,
+  }));
+  const hoveredPoint = hoveredDay ? points.find((point) => point.day === hoveredDay) : null;
+  const hoveredDate = hoveredPoint
+    ? `${monthKey}-${String(hoveredPoint.day).padStart(2, "0")}`
+    : "";
+  const hoveredTransactions = hoveredDate
+    ? monthTx.filter((t) => t.date === hoveredDate && (t.type === "expense" || !t.type))
+    : [];
+  const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+  const labelStep = lastDay <= 10 ? 1 : 5;
 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex justify-between items-center">
         <div>
-          <p className="muted text-xs uppercase tracking-wide">Grafik Pengeluaran Mingguan</p>
+          <p className="muted text-xs uppercase tracking-wide">Grafik Pengeluaran Harian</p>
         </div>
         <div className="flex gap-4 text-xs">
           <div>
@@ -285,7 +307,7 @@ function DailySpendingChart({ monthTx, monthKey }) {
           </div>
           <div>
             <p className="muted">Total bulan</p>
-            <p className="font-bold tabular" style={{ color: "var(--rose)" }}>{rupiah(weeklyData.reduce((s, w) => s + w.total, 0))}</p>
+            <p className="font-bold tabular" style={{ color: "var(--rose)" }}>{rupiah(dailySpending.reduce((s, d) => s + d.total, 0))}</p>
           </div>
         </div>
       </div>
@@ -305,46 +327,95 @@ function DailySpendingChart({ monthTx, monthKey }) {
           />
         ))}
 
-        {/* Bars */}
-        {weeklyData.map((w, idx) => {
-          const barHeight = maxWeekly > 0 ? (w.total / maxWeekly) * chartHeight : 0;
-          const xPos = 40 + (idx * barWidth * 360) + (barWidth * 180 / 100);
+        <path d={path} fill="none" stroke="var(--gold)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        {points.map((point) => {
+          const isHovered = point.day === hoveredDay;
+          const pointDate = `${monthKey}-${String(point.day).padStart(2, "0")}`;
           return (
-            <g key={`bar-${idx}`}>
-              <rect
-                x={xPos - (barWidth * 180 / 100) / 2}
-                y={chartHeight - barHeight}
-                width={(barWidth * 360) * 0.7}
-                height={Math.max(barHeight, 2)}
-                fill="var(--gold)"
-                opacity="0.8"
-                rx="2"
-              />
+            <g
+              key={`point-${point.day}`}
+              onMouseEnter={() => setHoveredDay(point.day)}
+              onMouseLeave={() => setHoveredDay(null)}
+              style={{ cursor: "pointer" }}
+            >
+              <rect x={point.x - 8} y="0" width="16" height={chartHeight} fill="transparent" />
+              {point.total > 0 && (
+                <circle
+                  cx={point.x}
+                  cy={point.y}
+                  r={isHovered ? 5 : 3}
+                  fill="var(--gold)"
+                  stroke={isHovered ? "var(--text)" : "none"}
+                  strokeWidth="1.5"
+                />
+              )}
+              <title>{`${pointDate}: ${rupiah(point.total)}`}</title>
             </g>
           );
         })}
+        {hoveredPoint && (
+          <g pointerEvents="none">
+            <rect
+              x={hoveredPoint.x > 280 ? hoveredPoint.x - 132 : hoveredPoint.x + 8}
+              y="6"
+              width="124"
+              height={Math.min(72, 30 + hoveredTransactions.slice(0, 2).length * 17)}
+              rx="6"
+              fill="var(--surface)"
+              stroke="var(--gold)"
+              strokeWidth="1"
+            />
+            <text
+              x={hoveredPoint.x > 280 ? hoveredPoint.x - 124 : hoveredPoint.x + 16}
+              y="20"
+              fontSize="10"
+              fill="var(--muted)"
+            >
+              {hoveredDate}
+            </text>
+            <text
+              x={hoveredPoint.x > 280 ? hoveredPoint.x - 124 : hoveredPoint.x + 16}
+              y="34"
+              fontSize="11"
+              fill="var(--text)"
+              fontWeight="700"
+            >
+              {rupiah(hoveredPoint.total)}
+            </text>
+            {hoveredTransactions.slice(0, 2).map((transaction, index) => (
+              <text
+                key={`${transaction.id}-detail`}
+                x={hoveredPoint.x > 280 ? hoveredPoint.x - 124 : hoveredPoint.x + 16}
+                y={49 + index * 14}
+                fontSize="9"
+                fill="var(--muted)"
+              >
+                {(transaction.note || "Pengeluaran").slice(0, 19)}
+              </text>
+            ))}
+          </g>
+        )}
 
         {/* X-axis labels */}
-        {weeklyData.map((w, idx) => {
-          const xPos = 40 + (idx * barWidth * 360) + (barWidth * 180 / 100);
+        {points.filter((point) => point.day % labelStep === 0 || point.day === 1 || point.day === lastDay).map((point) => {
           return (
             <text
-              key={`label-${idx}`}
-              x={xPos}
+              key={`label-${point.day}`}
+              x={point.x}
               y={chartHeight + 20}
               textAnchor="middle"
               fontSize="11"
               fill="var(--muted)"
               className="muted"
             >
-              {w.week}
+              {point.day}
             </text>
           );
         })}
 
         {/* Y-axis labels */}
         {[0, 0.5, 1].map((ratio, i) => {
-          const value = Math.round(maxWeekly * ratio);
+          const value = Math.round(maxDaily * ratio);
           const shortVal = value >= 1000000 ? `${Math.round(value / 1000000)}jt` : value >= 1000 ? `${Math.round(value / 1000)}k` : String(value);
           return (
             <text
@@ -362,14 +433,10 @@ function DailySpendingChart({ monthTx, monthKey }) {
         })}
       </svg>
 
-      {/* Legend */}
-      <div className="flex flex-wrap gap-3 text-xs">
-        {weeklyData.map((w, idx) => (
-          <div key={`detail-${idx}`} className="text-xs">
-            <span className="muted">{w.week} ({w.days}):</span>
-            <span className="font-medium ml-1 tabular">{rupiah(w.total)}</span>
-          </div>
-        ))}
+      <div className="flex items-center justify-between text-xs muted">
+        <span>Hari ke-1</span>
+        <span>Setiap titik = total pengeluaran hari itu</span>
+        <span>Hari ke-{lastDay}</span>
       </div>
     </div>
   );
@@ -454,12 +521,12 @@ function AllocationRing({ categories, centerLabel, centerValue }) {
     : null;
   const bg = stops ? `conic-gradient(${stops})` : "var(--surface2)";
   return (
-    <div className="flex items-center gap-6 flex-wrap">
-      <div className="relative" style={{ width: 168, height: 168 }}>
-        <div style={{ width: 168, height: 168, borderRadius: "9999px", background: bg }} />
+    <div className="allocation-ring flex flex-col items-center gap-5 text-center">
+      <div className="relative" style={{ width: 190, height: 190 }}>
+        <div style={{ width: 190, height: 190, borderRadius: "9999px", background: bg }} />
         <div
           className="card absolute flex flex-col items-center justify-center"
-          style={{ top: 22, left: 22, width: 124, height: 124, borderRadius: "9999px" }}
+          style={{ top: 26, left: 26, width: 138, height: 138, borderRadius: "9999px" }}
         >
           <span className="muted" style={{ fontSize: 11 }}>{centerLabel}</span>
           <span className="display tabular" style={{ fontSize: 15, fontWeight: 700, textAlign: "center" }}>
@@ -467,7 +534,7 @@ function AllocationRing({ categories, centerLabel, centerValue }) {
           </span>
         </div>
       </div>
-      <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap justify-center gap-x-5 gap-y-2">
         {categories.map((c, i) => (
           <div key={c.id} className="flex items-center gap-2 text-sm">
             <span
@@ -1206,9 +1273,13 @@ function Dashboard({ user, transactions, onOpenCategory, onLogout, onEditAlloc, 
   const cashIncome = income + totalTopup;
   const thisMonthNet = cashIncome - totalSpent;
   const balance = cumulativeBalanceUpTo(user, transactions, activeMonth);
+  const totalAssets = user.categories
+    .filter((category) => category.isAsset)
+    .reduce((sum, category) => sum + assetBalance(transactions, category.id), 0);
+  const totalEquity = balance + totalAssets;
   const prevCarry = balance - thisMonthNet;
 
-  const spentFor = (catId) => expenses.filter((t) => t.categoryId === catId).reduce((s, t) => s + Number(t.amount), 0);
+  const spentFor = (catId) => expenses.filter((t) => t.categoryId === catId && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
   const withdrawFor = (catId) => monthTx.filter((t) => t.categoryId === catId && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const directTopupFor = (catId) => topups.filter((t) => t.categoryId === catId && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const subTopupFor = (catId) => topups.filter((t) => t.categoryId === catId && t.subId).reduce((s, t) => s + Number(t.amount), 0);
@@ -1269,6 +1340,11 @@ function Dashboard({ user, transactions, onOpenCategory, onLogout, onEditAlloc, 
                   termasuk {rupiah(prevCarry)} bawaan bulan lalu
                 </p>
               )}
+            </div>
+            <div>
+              <p className="muted text-xs uppercase tracking-wide">Total Equity</p>
+              <p className="display tabular" style={{ fontSize: 20, fontWeight: 700, color: "var(--gold)" }}>{rupiah(totalEquity)}</p>
+              <p className="text-xs mt-0.5 muted">Saldo + aset tercatat</p>
             </div>
           </div>
         </div>
@@ -1386,7 +1462,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
     : history;
   const recurring = (user.recurring || []).filter((r) => r.categoryId === cat.id);
 
-  const spentForSub = (sid) => monthTx.filter((t) => t.subId === sid && isExpenseTx(t)).reduce((s, t) => s + Number(t.amount), 0);
+  const spentForSub = (sid) => monthTx.filter((t) => t.subId === sid && isExpenseTx(t) && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
   const withdrawnForSub = (sid) => monthTx.filter((t) => t.subId === sid && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const topupForSub = (sid) => monthTx.filter((t) => t.subId === sid && isTopupTx(t)).reduce((s, t) => s + Number(t.amount), 0);
 
@@ -1690,7 +1766,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
 /* ---------- App ---------- */
 /* ---------- Add money modal ---------- */
 function AddMoneyModal({ user, onClose, onSubmit }) {
-  const [target, setTarget] = useState("global"); // global | category | sub
+  const [target, setTarget] = useState("global"); // global | category | sub | asset
   const [categoryId, setCategoryId] = useState(user.categories[0]?.id || "");
   const [subId, setSubId] = useState("");
   const [amount, setAmount] = useState("");
@@ -1704,15 +1780,17 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
   const submit = () => {
     const amt = Number(amount);
     if (!(amt > 0)) return;
+    if ((target === "sub" || target === "asset") && !categoryId) return;
     if (target === "sub" && !subId) return;
     onSubmit({
       id: uid(),
-      type: "topup",
+      type: target === "asset" ? "asset_topup" : "topup",
       categoryId: target === "global" ? null : categoryId,
       subId: target === "sub" ? subId : null,
       amount: amt,
       note: note.trim(),
       date,
+      directAsset: target === "asset",
     });
   };
 
@@ -1726,8 +1804,8 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
           <button className="icon-btn" onClick={onClose}><X size={18} /></button>
         </div>
         <p className="muted text-sm mb-4">
-          Tambahkan dana bulan ini ke seluruh alokasi (ikut terbagi sesuai persentase), ke satu
-          kategori tertentu, atau langsung ke satu sub-alokasi.
+          Tambahkan dana bulan ini ke seluruh alokasi, kategori tertentu, sub-alokasi,
+          atau langsung mencatatnya sebagai saldo aset.
         </p>
 
         <div className="flex flex-col gap-4">
@@ -1736,13 +1814,14 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "global")} onClick={() => setTarget("global")}>Seluruh Alokasi</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "category")} onClick={() => setTarget("category")}>Kategori Tertentu</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "sub")} onClick={() => setTarget("sub")}>Sub-alokasi Tertentu</button>
+              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "asset")} onClick={() => { setTarget("asset"); setSubId(""); }}>Saldo Aset</button>
             </div>
           </Field>
 
-          {(target === "category" || target === "sub") && (
+          {(target === "category" || target === "sub" || target === "asset") && (
             <Field label="Kategori">
               <select value={categoryId} onChange={(e) => chooseCategory(e.target.value)}>
-                {user.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+               {(target === "asset" ? user.categories.filter((c) => c.isAsset) : user.categories).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </Field>
           )}
@@ -1755,6 +1834,7 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
               </select>
             </Field>
           )}
+          {target === "asset" && <p className="muted text-xs">Dana ini langsung menambah saldo kategori aset dan tidak dihitung sebagai pemakaian alokasi.</p>}
           {target === "sub" && cat && cat.subs.length === 0 && (
             <p className="text-sm" style={{ color: "var(--rose)" }}>Kategori ini belum punya sub-alokasi. Tambahkan lewat Edit Alokasi dulu.</p>
           )}
@@ -1772,7 +1852,7 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
           <button
             className="btn-primary flex items-center justify-center gap-2 mt-1"
             onClick={submit}
-            disabled={!(Number(amount) > 0) || (target === "sub" && (!cat || cat.subs.length === 0))}
+            disabled={!(Number(amount) > 0) || ((target === "sub" || target === "asset") && !cat)}
           >
             <Plus size={16} /> Tambahkan Dana
           </button>
@@ -1814,8 +1894,8 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
 
   const directTopupForCat = (catId) => topups.filter((t) => t.categoryId === catId && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const topupForSub = (catId, subId) => topups.filter((t) => t.categoryId === catId && t.subId === subId).reduce((s, t) => s + Number(t.amount), 0);
-  const spentForCat = (catId) => expenses.filter((t) => t.categoryId === catId).reduce((s, t) => s + Number(t.amount), 0);
-  const spentForSub = (catId, subId) => expenses.filter((t) => t.categoryId === catId && t.subId === subId).reduce((s, t) => s + Number(t.amount), 0);
+  const spentForCat = (catId) => expenses.filter((t) => t.categoryId === catId && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
+  const spentForSub = (catId, subId) => expenses.filter((t) => t.categoryId === catId && t.subId === subId && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
 
   const monthTxSorted = [...monthT].sort((a, b) => (a.date < b.date ? 1 : -1));
   const filteredTx = search.trim()
@@ -2036,15 +2116,12 @@ function ForgotPasswordModal({ onClose }) {
   const checkEmail = async () => {
     if (!email.trim()) return;
     setBusy(true); setError("");
-    const uname = await readKey(emailKey(email));
-    if (!uname) { setBusy(false); setError("Email tidak ditemukan."); return; }
-    const u = await readKey(userKey(uname));
+    const { error: resetError } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: window.location.origin,
+    });
     setBusy(false);
-    if (!u) { setError("Data akun tidak ditemukan."); return; }
-    if (!u.securityQuestion) { setError("Akun ini belum punya pertanyaan keamanan (dibuat sebelum fitur ini ada)."); return; }
-    setUsername(uname);
-    setAccount(u);
-    setStep("question");
+    if (resetError) { setError(resetError.message); return; }
+    setStep("done");
   };
 
   const verifyAnswer = () => {
@@ -2061,9 +2138,8 @@ function ForgotPasswordModal({ onClose }) {
     if (newPassword.length < 4) { setError("Password minimal 4 karakter."); return; }
     if (newPassword !== confirmPassword) { setError("Konfirmasi password tidak sama."); return; }
     setBusy(true); setError("");
-    const updated = { ...account, passwordHash: await hashPassword(newPassword) };
-    delete updated.password;
-    await writeKey(userKey(username), updated);
+    const { error: resetError } = await supabase.auth.updateUser({ password: newPassword });
+    if (resetError) { setBusy(false); setError(resetError.message); return; }
     setBusy(false);
     setStep("done");
   };
@@ -2147,8 +2223,8 @@ function ForgotPasswordModal({ onClose }) {
         {step === "done" && (
           <>
             <div className="check-badge anim-pop-delay" style={{ marginTop: 8 }}><Check size={26} color="#101815" /></div>
-            <p className="text-center mt-4" style={{ fontWeight: 600 }}>Password berhasil diubah!</p>
-            <p className="muted text-sm text-center mt-1">Silakan masuk lagi pakai password barumu.</p>
+            <p className="text-center mt-4" style={{ fontWeight: 600 }}>Email reset password terkirim!</p>
+            <p className="muted text-sm text-center mt-1">Buka tautan di email untuk membuat password baru.</p>
             <button className="btn-primary w-full mt-6 flex items-center justify-center gap-2" onClick={onClose}>
               Kembali ke Masuk <ArrowRight size={16} />
             </button>
@@ -2171,8 +2247,8 @@ function ResetAccountModal({ user, onClose, onConfirm }) {
   const submit = async () => {
     if (!canSubmit) return;
     setBusy(true); setError("");
-    const ok = await verifyPassword(password, user);
-    if (!ok) { setBusy(false); setError("Password salah."); return; }
+    const { error: authError } = await supabase.auth.signInWithPassword({ email: user.email, password });
+    if (authError) { setBusy(false); setError("Password salah."); return; }
     await onConfirm();
     setBusy(false);
   };
@@ -2276,7 +2352,7 @@ function DeleteAccountModal({ user, onClose, onConfirm }) {
 }
 
 /* ---------- Settings page ---------- */
-function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfile, onImport, onBack, onOpenReset, onOpenDelete, onLogout }) {
+function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfile, onImport, onMigrateLocal, onBack, onOpenReset, onOpenDelete, onLogout }) {
   const activeMonth = getActiveMonth(user);
   const [name, setName] = useState(user.name || "");
   const [age, setAge] = useState(user.age || "");
@@ -2285,6 +2361,8 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
   const [importOk, setImportOk] = useState(false);
+  const [migrationError, setMigrationError] = useState("");
+  const [migrationOk, setMigrationOk] = useState(false);
 
   const profileValid = name.trim() && Number(age) > 0 && Number(income) > 0;
   const saveProfile = () => {
@@ -2341,6 +2419,25 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
       setImportError("File/teks JSON tidak valid atau formatnya bukan hasil export Pundi.");
     }
   };
+  const migrateLocal = () => {
+    setMigrationError(""); setMigrationOk(false);
+    try {
+      const prefix = "pundi:shared:";
+      const localUser = JSON.parse(window.localStorage.getItem(`${prefix}mmp_user_${user.username}`) || "null");
+      const localTx = JSON.parse(window.localStorage.getItem(`${prefix}mmp_tx_${user.username}`) || "[]");
+      if (!localUser || !Array.isArray(localTx)) throw new Error("missing");
+      onMigrateLocal({
+        name: localUser.name || "", age: localUser.age || null, income: localUser.income || null,
+        monthlyIncomes: localUser.monthlyIncomes || {},
+        strategyMode: localUser.strategyMode || null, categories: localUser.categories || [],
+        recurring: localUser.recurring || [], goals: localUser.goals || [],
+        confirmed: !!localUser.confirmed, stage: localUser.stage || "dashboard",
+      }, localTx);
+      setMigrationOk(true);
+    } catch (error) {
+      setMigrationError("Data lokal untuk username ini tidak ditemukan di browser ini.");
+    }
+  };
 
   return (
     <div className="min-h-screen">
@@ -2364,6 +2461,19 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
             <button className="btn-primary flex items-center justify-center gap-2" onClick={saveProfile} disabled={!profileValid}>
               <Check size={16} /> {profileSaved ? "Tersimpan!" : "Simpan Profil"}
             </button>
+          </div>
+
+          <div className="card p-6">
+            <p className="muted text-xs uppercase tracking-wide mb-3">Migrasi dari browser lama</p>
+            <p className="muted text-sm">
+              Memindahkan akun dan transaksi lokal dengan username <b>{user.username}</b> ke Supabase.
+              Jalankan hanya jika data Supabase masih kosong.
+            </p>
+            <button className="btn-ghost flex items-center gap-2 mt-3" onClick={migrateLocal}>
+              <Upload size={15} /> Migrasikan Data Lokal
+            </button>
+            {migrationError && <p className="text-sm mt-2" style={{ color: "var(--rose)" }}>{migrationError}</p>}
+            {migrationOk && <p className="text-sm mt-2" style={{ color: "var(--teal)" }}>Data lokal berhasil dimigrasikan.</p>}
           </div>
         </div>
 
@@ -2908,21 +3018,14 @@ export default function App() {
       const savedTheme = await readKey(THEME_KEY, false);
       if (savedTheme === "light" || savedTheme === "dark") setTheme(savedTheme);
 
-      const savedUsername = await readKey(SESSION_KEY, false);
-      if (savedUsername) {
-        let existing = await readKey(userKey(savedUsername));
-        if (existing) {
-          if (existing.income && (!existing.monthlyIncomes || Object.keys(existing.monthlyIncomes).length === 0)) {
-            existing = { ...existing, monthlyIncomes: { [nowMonthKey()]: existing.income } };
-            await writeKey(userKey(savedUsername), existing);
-          }
-          const tx = (await readKey(txKey(savedUsername))) || [];
-          setUser(existing);
-          setTransactions(tx);
-        }
-      }
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) await loadAccount(session.user.id);
       setSessionChecked(true);
-    })();
+    })().catch((error) => {
+      console.error("Supabase session load failed", error);
+      setAuthError(error.message);
+      setSessionChecked(true);
+    });
   }, []);
 
   const toggleTheme = () => {
@@ -2931,54 +3034,110 @@ export default function App() {
     writeKey(THEME_KEY, next, false);
   };
 
-  const persistUser = (u) => { writeKey(userKey(u.username), u); };
-  const persistTx = (uname, tx) => { writeKey(txKey(uname), tx); };
+  const loadAccount = async (userId) => {
+    const [{ data: profile, error: profileError }, { data: tx, error: txError }] = await Promise.all([
+      supabase.from("profiles").select("*").eq("id", userId).single(),
+      supabase.from("transactions").select("*").eq("user_id", userId).order("date", { ascending: true }),
+    ]);
+    if (profileError) throw profileError;
+    if (txError) throw txError;
+    setUser({
+      ...profile,
+      monthlyIncomes: profile.monthly_incomes || {},
+      strategyMode: profile.strategy_mode,
+      passwordHash: undefined,
+      securityQuestion: profile.security_question,
+      securityAnswer: profile.security_answer,
+    });
+    setTransactions((tx || []).map(({ user_id, category_id, sub_id, direct_asset, ...item }) => ({
+      ...item,
+      categoryId: category_id,
+      subId: sub_id,
+      directAsset: !!direct_asset,
+      amount: Number(item.amount),
+    })));
+  };
+
+  const profilePayload = (u) => ({
+    id: u.id,
+    username: u.username,
+    email: u.email,
+    name: u.name || "",
+    age: u.age || null,
+    income: u.income || null,
+    monthly_incomes: u.monthlyIncomes || {},
+    strategy_mode: u.strategyMode || null,
+    categories: u.categories || [],
+    recurring: u.recurring || [],
+    goals: u.goals || [],
+    confirmed: !!u.confirmed,
+    stage: u.stage || "onboarding",
+    security_question: u.securityQuestion || null,
+    security_answer: u.securityAnswer || null,
+  });
+
+  const persistUser = async (u) => {
+    const { error } = await supabase.from("profiles").upsert(profilePayload(u));
+    if (error) console.error("profile save failed", error);
+  };
+
+  const persistTx = async (userId, tx) => {
+    const rows = tx.map((item) => ({
+      id: item.id,
+      user_id: userId,
+      date: item.date,
+      type: item.type || "expense",
+      category_id: item.categoryId || null,
+      sub_id: item.subId || null,
+      direct_asset: !!item.directAsset,
+      note: item.note || null,
+      amount: Number(item.amount),
+    }));
+    const { error: deleteError } = await supabase.from("transactions").delete().eq("user_id", userId);
+    if (deleteError) console.error("transaction cleanup failed", deleteError);
+    if (rows.length) {
+      const { error } = await supabase.from("transactions").insert(rows);
+      if (error) console.error("transaction save failed", error);
+    }
+  };
 
   const updateUser = (patch) => {
     setUser((prev) => {
       const next = { ...prev, ...patch };
-      persistUser(next);
+      void persistUser(next);
       return next;
     });
   };
 
   const handleLogin = async (email, password) => {
     setBusy(true); setAuthError("");
-    const username = await readKey(emailKey(email));
-    if (!username) { setBusy(false); setAuthError("Akun dengan email ini tidak ditemukan."); return; }
-    let existing = await readKey(userKey(username));
-    if (!existing) { setBusy(false); setAuthError("Akun tidak ditemukan."); return; }
-    const ok = await verifyPassword(password, existing);
-    if (!ok) { setBusy(false); setAuthError("Password salah."); return; }
-    if (!existing.passwordHash) {
-      // upgrade legacy plaintext password to a hash, transparently
-      existing = { ...existing, passwordHash: await hashPassword(password) };
-      delete existing.password;
-      await writeKey(userKey(username), existing);
+    const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    if (error) { setBusy(false); setAuthError(error.message); return; }
+    try {
+      await loadAccount(data.user.id);
+      setPage("dashboard");
+    } catch (loadError) {
+      setAuthError(loadError.message);
+    } finally {
+      setBusy(false);
     }
-    if (existing.income && (!existing.monthlyIncomes || Object.keys(existing.monthlyIncomes).length === 0)) {
-      // legacy account from before manual per-month income existed — bootstrap
-      // the current month once so the manual system takes over from next month.
-      existing = { ...existing, monthlyIncomes: { [nowMonthKey()]: existing.income } };
-      await writeKey(userKey(username), existing);
-    }
-    const tx = (await readKey(txKey(username))) || [];
-    setUser(existing);
-    setTransactions(tx);
-    setPage("dashboard");
-    await writeKey(SESSION_KEY, username, false);
-    setBusy(false);
   };
 
   const handleRegister = async (username, email, password, securityQuestion, securityAnswer) => {
     setBusy(true); setAuthError("");
-    const existing = await readKey(userKey(username));
-    if (existing) { setBusy(false); setAuthError("Username sudah dipakai."); return; }
-    const emailTaken = await readKey(emailKey(email));
-    if (emailTaken) { setBusy(false); setAuthError("Email sudah terdaftar."); return; }
+    const { data: authData, error } = await supabase.auth.signUp({
+      email: email.trim(),
+      password,
+      options: { data: { username, securityQuestion, securityAnswer } },
+    });
+    if (error) { setBusy(false); setAuthError(error.message); return; }
+    if (!authData.session) {
+      setBusy(false);
+      setAuthError("Pendaftaran berhasil. Silakan verifikasi email sebelum masuk.");
+      return;
+    }
     const newUser = {
-      username, email,
-      passwordHash: await hashPassword(password),
+      id: authData.user.id, username, email: email.trim(),
       securityQuestion, securityAnswer,
       name: "", age: null, income: null,
       monthlyIncomes: {},
@@ -2989,16 +3148,15 @@ export default function App() {
       confirmed: false,
       stage: "onboarding",
     };
-    await writeKey(userKey(username), newUser);
-    await writeKey(emailKey(email), username);
-    await writeKey(SESSION_KEY, username, false);
+    const { error: profileError } = await supabase.from("profiles").upsert(profilePayload(newUser));
+    if (profileError) { setBusy(false); setAuthError(profileError.message); return; }
     setBusy(false);
     setTransactions([]);
     setPendingUser(newUser); // show welcome notice before entering the app
   };
 
   const handleLogout = () => {
-    deleteKey(SESSION_KEY, false);
+    void supabase.auth.signOut();
     setUser(null);
     setTransactions([]);
     setAuthError("");
@@ -3008,21 +3166,21 @@ export default function App() {
   const handleAddTx = (tx) => {
     setTransactions((prev) => {
       const next = [...prev, tx];
-      persistTx(user.username, next);
+      void persistTx(user.id, next);
       return next;
     });
   };
   const handleUpdateTx = (updatedTx) => {
     setTransactions((prev) => {
       const next = prev.map((t) => t.id === updatedTx.id ? updatedTx : t);
-      persistTx(user.username, next);
+      void persistTx(user.id, next);
       return next;
     });
   };
   const handleDeleteTx = (id) => {
     setTransactions((prev) => {
       const next = prev.filter((t) => t.id !== id);
-      persistTx(user.username, next);
+      void persistTx(user.id, next);
       return next;
     });
   };
@@ -3041,8 +3199,8 @@ export default function App() {
       confirmed: false,
       stage: "onboarding",
     };
-    await writeKey(userKey(user.username), resetUser);
-    await writeKey(txKey(user.username), []);
+    await persistUser(resetUser);
+    await supabase.from("transactions").delete().eq("user_id", user.id);
     setUser(resetUser);
     setTransactions([]);
     setPage("dashboard");
@@ -3059,10 +3217,12 @@ export default function App() {
   };
 
   const handleDeleteAccount = async () => {
-    await deleteKey(userKey(user.username));
-    await deleteKey(txKey(user.username));
-    await deleteKey(emailKey(user.email));
-    await deleteKey(SESSION_KEY, false);
+    const { error } = await supabase.rpc("delete_my_account");
+    if (error) {
+      setAuthError(error.message);
+      return;
+    }
+    await supabase.auth.signOut();
     setShowDeleteAccount(false);
     setUser(null);
     setTransactions([]);
@@ -3181,7 +3341,12 @@ export default function App() {
           onImport={(userPatch, tx) => {
             updateUser(userPatch);
             setTransactions(tx);
-            persistTx(user.username, tx);
+            void persistTx(user.id, tx);
+          }}
+          onMigrateLocal={(userPatch, tx) => {
+            updateUser(userPatch);
+            setTransactions(tx);
+            void persistTx(user.id, tx);
           }}
           onBack={() => setPage("dashboard")}
           onOpenReset={() => setShowResetAccount(true)}
@@ -3317,6 +3482,8 @@ const STYLE = `
 .mmp-app .unit-toggle button.unit-active{ background:var(--gold); color:#101815; font-weight:600; }
 .mmp-app .card2{ transition: transform .15s ease, border-color .15s ease, background .15s ease; }
 .mmp-app .cat-card{ cursor:pointer; }
+.mmp-app .allocation-ring{ width:100%; justify-content:center; }
+.mmp-app .spending-trend-chart{ width:100%; min-height:100%; }
 .mmp-app .cat-card:hover{ transform: translateY(-3px); border-color: var(--gold); }
 .mmp-app input, .mmp-app select{ transition: border-color .15s ease; }
 
@@ -3345,11 +3512,13 @@ const STYLE = `
 
 @media (max-width: 640px){
   .mmp-app{ overflow-x:hidden; }
+  .mmp-app *{ box-sizing:border-box; }
+  .mmp-app .min-h-screen{ min-height:100dvh; }
   .mmp-app .app-topbar{ align-items:flex-start; flex-wrap:wrap; gap:12px; padding:14px 16px; }
   .mmp-app .app-topbar-brand{ min-width:0; flex:1 1 100%; }
   .mmp-app .app-topbar-brand > span:last-child{ overflow-wrap:anywhere; }
   .mmp-app .app-topbar-actions{ width:100%; justify-content:flex-end; gap:8px; flex-wrap:wrap; }
-  .mmp-app .app-topbar-actions > *{ flex:1 1 auto; }
+  .mmp-app .app-topbar-actions > *{ flex:1 1 auto; min-width:0; }
   .mmp-app .app-topbar-actions > .btn-ghost{ text-align:center; }
   .mmp-app .card{ border-radius:12px; }
   .mmp-app .card.p-8{ padding:20px; }
@@ -3364,21 +3533,26 @@ const STYLE = `
 
   .mmp-app .min-w-0{ min-width:0; }
   .mmp-app .btn-primary, .mmp-app .btn-ghost{ padding:9px 14px; }
-  .mmp-app .btn-primary, .mmp-app .btn-ghost{ white-space:normal; }
+  .mmp-app .btn-primary, .mmp-app .btn-ghost{ white-space:normal; min-height:40px; }
 
   .mmp-app .dashboard-actions{ width:100%; overflow-x:auto; flex-wrap:nowrap; justify-content:flex-start; padding-bottom:2px; scrollbar-width:thin; }
   .mmp-app .dashboard-actions > *{ flex:0 0 auto; white-space:nowrap; }
-  .mmp-app .summary-metrics{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:16px; }
+  .mmp-app .summary-metrics{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }
+  .mmp-app .summary-metrics > *{ min-width:0; }
   .mmp-app .summary-metrics > :last-child{ grid-column:1 / -1; }
   .mmp-app .transaction-amount{ font-size:12px; line-height:1.25; white-space:nowrap; }
   .mmp-app .sub-allocation-amount{ font-size:12px; line-height:1.25; }
   .mmp-app .transaction-form{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }
   .mmp-app .transaction-form > input,
   .mmp-app .transaction-form > select{ max-width:none !important; min-width:0 !important; width:100%; }
-  .mmp-app .transaction-form > input:nth-of-type(1),
-  .mmp-app .transaction-form > input:nth-of-type(2),
-  .mmp-app .transaction-form > input:nth-of-type(3),
+  .mmp-app .transaction-form > input[type="number"],
+  .mmp-app .transaction-form > input[type="date"],
+  .mmp-app .transaction-form > input[placeholder*="Catatan"],
   .mmp-app .transaction-form > button{ grid-column:1 / -1; }
+  .mmp-app .transaction-form > input,
+  .mmp-app .transaction-form > select,
+  .mmp-app .transaction-form > button{ min-height:42px; }
+  .mmp-app .transaction-form > input[placeholder*="Catatan"]{ min-width:0 !important; }
   .mmp-app .calculator-tabs{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); }
   .mmp-app .calculator-tabs > button{ min-width:0; padding-inline:10px; }
 
@@ -3405,6 +3579,17 @@ const STYLE = `
   .mmp-app .flex.items-center.justify-between.gap-2 > .flex-1{ min-width:0; }
   .mmp-app .tabular{ overflow-wrap:anywhere; }
   .mmp-app textarea{ max-width:100%; }
+}
+
+@media (max-width: 380px){
+  .mmp-app .card.p-8{ padding:16px; }
+  .mmp-app .card.p-6{ padding:14px; }
+  .mmp-app .summary-metrics{ grid-template-columns:1fr; }
+  .mmp-app .summary-metrics > :last-child{ grid-column:auto; }
+  .mmp-app .dashboard-actions > *{ padding-inline:11px; }
+  .mmp-app .calculator-tabs{ grid-template-columns:1fr; }
+  .mmp-app .transaction-form{ grid-template-columns:1fr; }
+  .mmp-app .transaction-form > select{ grid-column:auto; }
 }
 
 @media (prefers-reduced-motion: reduce){
