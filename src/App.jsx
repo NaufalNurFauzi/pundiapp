@@ -3453,6 +3453,7 @@ const STYLE = `
   background:var(--surface2); border:1px solid var(--border); color:var(--text);
   border-radius:8px; padding:9px 12px; outline:none; width:100%; font-size:14px;
 }
+.mmp-app input[type="date"]{ min-width:0; max-width:100%; }
 .mmp-app input::placeholder{ color:var(--muted); }
 .mmp-app input:focus, .mmp-app select:focus{ border-color:var(--gold); }
 .mmp-app .btn-primary{
@@ -3552,6 +3553,15 @@ const STYLE = `
   .mmp-app .transaction-form > input,
   .mmp-app .transaction-form > select,
   .mmp-app .transaction-form > button{ min-height:42px; }
+  .mmp-app input[type="date"]{
+    min-width:0 !important;
+    max-width:100% !important;
+    width:100% !important;
+    font-size:13px;
+    padding-left:8px;
+    padding-right:6px;
+  }
+  .mmp-app .transaction-form > input[type="date"]{ grid-column:1 / -1; }
   .mmp-app .transaction-form > input[placeholder*="Catatan"]{ min-width:0 !important; }
   .mmp-app .calculator-tabs{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); }
   .mmp-app .calculator-tabs > button{ min-width:0; padding-inline:10px; }
