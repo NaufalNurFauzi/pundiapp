@@ -1307,6 +1307,10 @@ function TopBar({ name, onLogout, right }) {
   );
 }
 
+function AppFooter() {
+  return <footer className="app-footer">Developed by <span>@naufalnurf__</span></footer>;
+}
+
 function Dashboard({ user, transactions, onOpenCategory, onLogout, onEditAlloc, onAddMoney, onViewHistory, onOpenSettings, onOpenGoals, onOpenCalculator, onConfirmMonthIncome }) {
   const activeMonth = getActiveMonth(user);
   const realCurrentMonth = nowMonthKey();
@@ -3356,6 +3360,7 @@ export default function App() {
           />
         )}
         {showForgotPassword && <ForgotPasswordModal onClose={() => setShowForgotPassword(false)} />}
+        <AppFooter />
       </div>
     );
   }
@@ -3523,6 +3528,7 @@ export default function App() {
           onConfirm={handleConfirmMonthIncome}
         />
       )}
+      <AppFooter />
     </div>
   );
 }
@@ -3557,9 +3563,25 @@ const STYLE = `
   width:160px;
   min-width:0;
   max-width:160px !important;
+  height:42px;
+  box-sizing:border-box;
+  display:block;
+  align-self:stretch;
+  text-align:left;
+  line-height:22px;
+  padding:9px 10px;
+  font-family:inherit;
   font-size:13px;
+  letter-spacing:0;
   white-space:nowrap;
 }
+.mmp-app .app-footer{
+  padding:4px 16px 18px;
+  color:var(--muted);
+  font-size:11px;
+  text-align:center;
+}
+.mmp-app .app-footer span{ color:var(--gold); }
 .mmp-app input::placeholder{ color:var(--muted); }
 .mmp-app input:focus, .mmp-app select:focus{ border-color:var(--gold); }
 .mmp-app .btn-primary{
@@ -3660,6 +3682,7 @@ const STYLE = `
     width:100%;
     max-width:100% !important;
     min-width:0;
+    height:42px;
     font-size:13px;
   }
   .mmp-app .transaction-form > input,
