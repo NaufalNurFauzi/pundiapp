@@ -906,10 +906,11 @@ function CustomBuilder({ initialCategories, income, onDone, onBack }) {
           <div className="flex flex-col gap-2 mb-4">
             {categories.map((c, i) => (
               <div key={c.id} className="card2 p-3 flex flex-col gap-2 anim-fade-up">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center justify-between gap-2 main-allocation-row">
                   <span className="flex items-center gap-2 text-sm flex-1">
                     <span style={{ width: 10, height: 10, borderRadius: 9999, background: COLORS[i % COLORS.length], flexShrink: 0 }} />
                     <input
+                      className="main-allocation-name"
                       value={c.name}
                       onChange={(e) => setCategories(categories.map((x) => x.id === c.id ? { ...x, name: e.target.value } : x))}
                     />
@@ -1196,7 +1197,7 @@ function AllocationEditor({ user, onSave, onCancel }) {
               const subTotal = c.subs.reduce((s, x) => s + Number(x.percent || 0), 0);
               return (
                 <div key={c.id} className="card2 p-3 anim-fade-up">
-                  <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center justify-between gap-2 main-allocation-row">
                     <button
                       className="flex items-center gap-2 text-sm flex-1"
                       style={{ background: "none", border: "none", color: "var(--text)", cursor: "pointer", textAlign: "left" }}
@@ -1205,6 +1206,7 @@ function AllocationEditor({ user, onSave, onCancel }) {
                       <span style={{ width: 10, height: 10, borderRadius: 9999, background: COLORS[i % COLORS.length], flexShrink: 0 }} />
                       <ChevronRight size={14} className="muted" style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
                       <input
+                        className="main-allocation-name"
                         value={c.name}
                         onClick={(e) => e.stopPropagation()}
                         onChange={(e) => updateCatName(c.id, e.target.value)}
@@ -3707,6 +3709,34 @@ const STYLE = `
     overflow-wrap:normal;
   }
   .mmp-app .sub-allocation-row > .icon-btn{
+    flex-shrink:0;
+  }
+  .mmp-app .main-allocation-row{
+    display:grid;
+    grid-template-columns:minmax(0, 1fr) auto auto;
+    align-items:center;
+  }
+  .mmp-app .main-allocation-row > .flex.items-center.gap-2{
+    grid-column:1 / -1;
+    min-width:0;
+  }
+  .mmp-app .main-allocation-row .main-allocation-name{
+    min-width:0;
+    width:100%;
+  }
+  .mmp-app .main-allocation-row > .flex.items-center.gap-1\\.5:has(.unit-toggle){
+    width:auto;
+    min-width:0;
+  }
+  .mmp-app .main-allocation-row > .flex.items-center.gap-1\\.5:has(.unit-toggle) > input{
+    width:clamp(72px, 22vw, 104px);
+    min-width:0;
+  }
+  .mmp-app .main-allocation-row > .tabular{
+    min-width:0 !important;
+    white-space:nowrap;
+  }
+  .mmp-app .main-allocation-row > .icon-btn{
     flex-shrink:0;
   }
   .mmp-app .dashboard-summary-metrics{
