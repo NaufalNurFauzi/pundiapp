@@ -1371,7 +1371,7 @@ function Dashboard({ user, transactions, onOpenCategory, onLogout, onEditAlloc, 
               <button className="btn-primary text-sm flex items-center gap-2" onClick={onAddMoney}><Plus size={14} /> Tambah Uang</button>
             </div>
           </div>
-          <div className="flex flex-wrap gap-8 mt-3">
+          <div className="dashboard-summary-metrics flex flex-wrap gap-8 mt-3">
             <div>
               <p className="muted text-xs uppercase tracking-wide">Income</p>
               <p className="display tabular" style={{ fontSize: 20, fontWeight: 700 }}>{rupiah(cashIncome)}</p>
@@ -3697,11 +3697,36 @@ const STYLE = `
     width:auto;
     min-width:0;
   }
+  .mmp-app .sub-allocation-row > .flex.items-center.gap-1\\.5:has(.unit-toggle) > input{
+    width:clamp(72px, 22vw, 104px);
+    min-width:0;
+  }
   .mmp-app .sub-allocation-row > .sub-allocation-amount{
     min-width:0 !important;
     white-space:nowrap;
+    overflow-wrap:normal;
   }
-  .mmp-app .tabular{ overflow-wrap:anywhere; }
+  .mmp-app .sub-allocation-row > .icon-btn{
+    flex-shrink:0;
+  }
+  .mmp-app .dashboard-summary-metrics{
+    display:grid;
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+    gap:14px 18px;
+    width:100%;
+  }
+  .mmp-app .dashboard-summary-metrics > *{
+    min-width:0;
+  }
+  .mmp-app .dashboard-summary-metrics > :nth-child(2),
+  .mmp-app .dashboard-summary-metrics > :nth-child(4){
+    text-align:right;
+  }
+  .mmp-app .dashboard-summary-metrics .tabular{
+    white-space:nowrap;
+    overflow-wrap:normal;
+  }
+  .mmp-app .tabular{ overflow-wrap:normal; }
   .mmp-app textarea{ max-width:100%; }
 }
 
