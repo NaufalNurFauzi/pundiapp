@@ -56,6 +56,22 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute procedure public.handle_new_user();
 
+create or replace function public.is_username_available(candidate text)
+returns boolean
+language sql
+security definer set search_path = public
+as $$
+  select nullif(trim(candidate), '') is not null
+    and not exists (
+      select 1
+      from public.profiles
+      where lower(username) = lower(trim(candidate))
+    );
+$$;
+
+revoke all on function public.is_username_available(text) from public;
+grant execute on function public.is_username_available(text) to anon, authenticated;
+
 create or replace function public.delete_my_account()
 returns void
 language plpgsql

@@ -459,7 +459,6 @@ function PercentOrAmountInput({ percent, base, onChangePercent }) {
     <div className="flex items-center gap-1.5">
       <input
         type="number"
-        style={{ maxWidth: mode === "percent" ? 70 : 140 }}
         value={displayValue}
         onChange={(e) => handleChange(e.target.value)}
       />
@@ -555,10 +554,41 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
+  const [usernameStatus, setUsernameStatus] = useState("idle");
   const [securityQuestion, setSecurityQuestion] = useState(SECURITY_QUESTIONS[0]);
   const [securityAnswer, setSecurityAnswer] = useState("");
 
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+  const passwordsMatch = password === passwordConfirmation;
+
+  useEffect(() => {
+    if (mode !== "register") {
+      setUsernameStatus("idle");
+      return undefined;
+    }
+
+    const candidate = username.trim();
+    if (!candidate) {
+      setUsernameStatus("idle");
+      return undefined;
+    }
+
+    setUsernameStatus("checking");
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const { data, error: availabilityError } = await supabase.rpc("is_username_available", {
+        candidate,
+      });
+      if (cancelled) return;
+      setUsernameStatus(availabilityError ? "error" : data ? "available" : "taken");
+    }, 400);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [mode, username]);
 
   const submit = () => {
     if (!password) return;
@@ -566,7 +596,7 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
       if (!emailValid) return;
       onLogin(email.trim(), password);
     } else {
-      if (!username.trim() || !emailValid || !securityAnswer.trim()) return;
+      if (!username.trim() || usernameStatus !== "available" || !emailValid || !passwordsMatch || !securityAnswer.trim()) return;
       onRegister(username.trim(), email.trim(), password, securityQuestion, securityAnswer.trim());
     }
   };
@@ -612,10 +642,14 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
               <Field label="Username">
                 <input
                   value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  onChange={(e) => setUsername(e.target.value.replace(/\s/g, ""))}
                   onKeyDown={onEnter(submit)}
                   placeholder="cth. naufal"
                 />
+                {usernameStatus === "checking" && <span className="muted text-xs">Mengecek ketersediaan...</span>}
+                {usernameStatus === "available" && <span className="text-xs" style={{ color: "var(--teal)" }}>Username tersedia.</span>}
+                {usernameStatus === "taken" && <span className="text-xs" style={{ color: "var(--rose)" }}>Username sudah digunakan.</span>}
+                {usernameStatus === "error" && <span className="text-xs" style={{ color: "var(--rose)" }}>Username belum bisa dicek. Coba lagi.</span>}
               </Field>
             )}
             <Field label="Email">
@@ -641,6 +675,18 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
             </Field>
             {mode === "register" && (
               <>
+                <Field label="Konfirmasi Password">
+                  <input
+                    type="password"
+                    value={passwordConfirmation}
+                    onChange={(e) => setPasswordConfirmation(e.target.value)}
+                    onKeyDown={onEnter(submit)}
+                    placeholder="Ulangi password"
+                  />
+                  {passwordConfirmation && !passwordsMatch && (
+                    <span className="text-xs" style={{ color: "var(--rose)" }}>Password tidak sama.</span>
+                  )}
+                </Field>
                 <Field label="Pertanyaan Keamanan">
                   <select value={securityQuestion} onChange={(e) => setSecurityQuestion(e.target.value)}>
                     {SECURITY_QUESTIONS.map((q) => <option key={q} value={q}>{q}</option>)}
@@ -674,7 +720,7 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
             <button
               className="btn-primary flex items-center justify-center gap-2"
               onClick={submit}
-              disabled={busy || !password || !emailValid || (mode === "register" && (!username.trim() || !securityAnswer.trim()))}
+              disabled={busy || !password || !emailValid || (mode === "register" && (usernameStatus !== "available" || !passwordsMatch || !username.trim() || !securityAnswer.trim()))}
             >
               {mode === "login" ? "Masuk" : "Buat Akun"} <ArrowRight size={16} />
             </button>
