@@ -14,12 +14,13 @@ const monthKey = (d) => (d || "").slice(0, 7);
 const nowMonthKey = () => new Date().toISOString().slice(0, 7);
 const monthLabel = () =>
   new Date().toLocaleDateString("id-ID", { month: "long", year: "numeric" });
-const isExpenseTx = (t) => t.type !== "topup" && t.type !== "withdraw" && t.type !== "asset_topup" && !t.directAsset;
+const isExpenseTx = (t) => t.type !== "topup" && t.type !== "withdraw" && t.type !== "asset_topup" && t.type !== "asset_opening" && !t.directAsset;
 const isTopupTx = (t) => t.type === "topup";
 const isWithdrawTx = (t) => t.type === "withdraw";
 const isAssetTopupTx = (t) => t.type === "asset_topup" || t.directAsset;
-const isAssetDepositTx = (t) => t.type === "expense" || isAssetTopupTx(t) || !t.type;
-const isDepositTx = (t) => isAssetDepositTx(t); // "setor" into an asset category
+const isAssetOpeningTx = (t) => t.type === "asset_opening" || t.type === "asset_topup";
+const isAssetMonthlyDepositTx = (t) => t.type === "expense" || !t.type;
+const isDepositTx = (t) => isAssetMonthlyDepositTx(t) || isAssetOpeningTx(t); // all money already held by an asset
 const monthLabelFor = (mKey) => {
   const [y, m] = mKey.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("id-ID", { month: "long", year: "numeric" });
@@ -1328,7 +1329,7 @@ function Dashboard({ user, transactions, onOpenCategory, onLogout, onEditAlloc, 
 
   const spentFor = (catId) => expenses.filter((t) => t.categoryId === catId && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
   const withdrawFor = (catId) => monthTx.filter((t) => t.categoryId === catId && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
-  const assetDepositFor = (catId) => monthTx.filter((t) => t.categoryId === catId && isAssetDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0);
+  const assetDepositFor = (catId) => monthTx.filter((t) => t.categoryId === catId && isAssetMonthlyDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const directTopupFor = (catId) => topups.filter((t) => t.categoryId === catId && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const subTopupFor = (catId) => topups.filter((t) => t.categoryId === catId && t.subId).reduce((s, t) => s + Number(t.amount), 0);
 
@@ -1494,7 +1495,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const baseAllocated = effectiveIncome * cat.percent / 100;
   const allocated = baseAllocated + directTopup + subTopupTotal;
   const monthTx = allMonthTx.filter((t) => t.categoryId === cat.id);
-  const deposited = monthTx.filter(isAssetDepositTx).reduce((s, t) => s + Number(t.amount), 0);
+  const deposited = monthTx.filter(isAssetMonthlyDepositTx).reduce((s, t) => s + Number(t.amount), 0);
   const spent = isAsset ? deposited : monthTx.filter(isExpenseTx).reduce((s, t) => s + Number(t.amount), 0);
   const withdrawn = monthTx.filter(isWithdrawTx).reduce((s, t) => s + Number(t.amount), 0);
   const netAssetMovement = isAsset ? deposited - withdrawn : spent;
@@ -1511,7 +1512,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
     : history;
   const recurring = (user.recurring || []).filter((r) => r.categoryId === cat.id);
 
-  const spentForSub = (sid) => monthTx.filter((t) => t.subId === sid && (isAsset ? isAssetDepositTx(t) : isExpenseTx(t)) && (isAsset || !t.directAsset)).reduce((s, t) => s + Number(t.amount), 0);
+  const spentForSub = (sid) => monthTx.filter((t) => t.subId === sid && (isAsset ? isAssetMonthlyDepositTx(t) : isExpenseTx(t)) && (isAsset || !t.directAsset)).reduce((s, t) => s + Number(t.amount), 0);
   const withdrawnForSub = (sid) => monthTx.filter((t) => t.subId === sid && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const topupForSub = (sid) => monthTx.filter((t) => t.subId === sid && isTopupTx(t)).reduce((s, t) => s + Number(t.amount), 0);
 
@@ -1772,7 +1773,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
               const topup = isTopupTx(t);
               const withdraw = isWithdrawTx(t);
               const positive = topup || (isAsset && !withdraw); // setor & topup are "adds", tarik is "reduces"
-              const label = withdraw ? "Tarik" : topup ? "Tambahan dana" : isAsset ? "Setor" : null;
+              const label = withdraw ? "Tarik" : topup ? "Tambahan dana" : isAssetOpeningTx(t) ? "Saldo awal aset" : isAsset ? "Setor" : null;
               return (
                 <div key={t.id} className="card2 p-3 flex items-center justify-between anim-fade-up" style={{ animationDelay: `${Math.min(hi, 8) * 40}ms` }}>
                   <div>
@@ -1815,7 +1816,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
 /* ---------- App ---------- */
 /* ---------- Add money modal ---------- */
 function AddMoneyModal({ user, onClose, onSubmit }) {
-  const [target, setTarget] = useState("global"); // global | category | sub | asset
+  const [target, setTarget] = useState("global"); // global | category | sub | asset | asset_opening
   const [categoryId, setCategoryId] = useState(user.categories[0]?.id || "");
   const [subId, setSubId] = useState("");
   const [amount, setAmount] = useState("");
@@ -1829,7 +1830,7 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
   const chooseTarget = (nextTarget) => {
     setTarget(nextTarget);
     setSubId("");
-    if (nextTarget === "asset") {
+    if (nextTarget === "asset" || nextTarget === "asset_opening") {
       setCategoryId(assetCategories[0]?.id || "");
     } else if (nextTarget === "global") {
       setCategoryId(user.categories[0]?.id || "");
@@ -1841,17 +1842,17 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
   const submit = () => {
     const amt = Number(amount);
     if (!(amt > 0)) return;
-    if ((target === "sub" || target === "asset") && !categoryId) return;
+    if ((target === "sub" || target === "asset" || target === "asset_opening") && !categoryId) return;
     if (target === "sub" && !subId) return;
     onSubmit({
       id: uid(),
-      type: target === "asset" ? "asset_topup" : "topup",
+      type: target === "asset" || target === "asset_opening" ? "asset_opening" : "topup",
       categoryId: target === "global" ? null : categoryId,
       subId: target === "sub" ? subId : null,
       amount: amt,
       note: note.trim(),
       date,
-      directAsset: target === "asset",
+      directAsset: target === "asset" || target === "asset_opening",
     });
   };
 
@@ -1875,14 +1876,14 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "global")} onClick={() => setTarget("global")}>Seluruh Alokasi</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "category")} onClick={() => setTarget("category")}>Kategori Tertentu</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "sub")} onClick={() => setTarget("sub")}>Sub-alokasi Tertentu</button>
-              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "asset")} onClick={() => chooseTarget("asset")}>Saldo Aset</button>
+              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "asset" || target === "asset_opening")} onClick={() => chooseTarget("asset_opening")}>Saldo Awal Aset</button>
             </div>
           </Field>
 
-          {(target === "category" || target === "sub" || target === "asset") && (
+          {(target === "category" || target === "sub" || target === "asset" || target === "asset_opening") && (
             <Field label="Kategori">
               <select value={categoryId} onChange={(e) => chooseCategory(e.target.value)}>
-               {(target === "asset" ? assetCategories : user.categories).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+               {(target === "asset" || target === "asset_opening" ? assetCategories : user.categories).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </Field>
           )}
@@ -1896,6 +1897,7 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
             </Field>
           )}
           {target === "asset" && assetCategories.length > 0 && <p className="muted text-xs">Dana ini langsung menambah saldo kategori aset dan tidak dihitung sebagai pemakaian alokasi.</p>}
+          {target === "asset_opening" && assetCategories.length > 0 && <p className="muted text-xs">Catat total aset yang sudah kamu miliki. Saldo ini menambah equity dan tidak dihitung sebagai setoran bulan berjalan.</p>}
           {target === "asset" && assetCategories.length === 0 && (
             <p className="text-sm" style={{ color: "var(--rose)" }}>Belum ada kategori Tabungan/Investasi. Tandai kategori sebagai aset lewat Edit Alokasi dulu.</p>
           )}
@@ -1916,7 +1918,7 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
           <button
             className="btn-primary flex items-center justify-center gap-2 mt-1"
             onClick={submit}
-            disabled={!(Number(amount) > 0) || ((target === "sub" || target === "asset") && !cat) || (target === "asset" && !cat?.isAsset)}
+            disabled={!(Number(amount) > 0) || ((target === "sub" || target === "asset" || target === "asset_opening") && !cat) || ((target === "asset" || target === "asset_opening") && !cat?.isAsset)}
           >
             <Plus size={16} /> Tambahkan Dana
           </button>
@@ -1945,10 +1947,12 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
   const monthT = transactions.filter((t) => monthKey(t.date) === selected);
   const expenses = monthT.filter(isExpenseTx);
   const topups = monthT.filter(isTopupTx);
-  const assetTopups = monthT.filter(isAssetTopupTx);
+  const assetTopups = monthT.filter((t) => isAssetTopupTx(t) && !isAssetOpeningTx(t));
+  const assetOpenings = monthT.filter(isAssetOpeningTx);
   const globalTopup = topups.filter((t) => !t.categoryId).reduce((s, t) => s + Number(t.amount), 0);
   const totalTopup = topups.reduce((s, t) => s + Number(t.amount), 0);
   const totalAssetTopup = assetTopups.reduce((s, t) => s + Number(t.amount), 0);
+  const totalAssetOpening = assetOpenings.reduce((s, t) => s + Number(t.amount), 0);
   const selectedIncome = getIncomeForMonth(user, selected);
   const hasIncomeRecord = Object.prototype.hasOwnProperty.call(user.monthlyIncomes || {}, selected);
   const effectiveIncome = selectedIncome + globalTopup;
@@ -1961,7 +1965,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
   const directTopupForCat = (catId) => topups.filter((t) => t.categoryId === catId && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const topupForSub = (catId, subId) => topups.filter((t) => t.categoryId === catId && t.subId === subId).reduce((s, t) => s + Number(t.amount), 0);
   const spentForCat = (catId) => expenses.filter((t) => t.categoryId === catId && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
-  const assetDepositForCat = (catId) => monthT.filter((t) => t.categoryId === catId && isAssetDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0);
+  const assetDepositForCat = (catId) => monthT.filter((t) => t.categoryId === catId && isAssetMonthlyDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const spentForSub = (catId, subId) => expenses.filter((t) => t.categoryId === catId && t.subId === subId && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
 
   const monthTxSorted = [...monthT].sort((a, b) => (a.date < b.date ? 1 : -1));
@@ -2044,6 +2048,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
               <p className="tabular" style={{ fontWeight: 700 }}>{rupiah(cashIncome)}</p>
               {totalTopup > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--teal)" }}>termasuk +{rupiah(totalTopup)} tambahan</p>}
               {totalAssetTopup > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--gold)" }}>termasuk +{rupiah(totalAssetTopup)} penambahan aset</p>}
+              {totalAssetOpening > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--teal)" }}>+{rupiah(totalAssetOpening)} saldo awal aset</p>}
               {!hasIncomeRecord && <p className="text-xs mt-0.5 muted">*belum ada input income khusus bulan ini, pakai income terakhir yang diketahui</p>}
             </div>
             <div>
@@ -2135,16 +2140,17 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
               const sub = cat?.subs.find((s) => s.id === t.subId);
               const topup = isTopupTx(t);
               const assetTopup = isAssetTopupTx(t);
-              const positive = topup || assetTopup;
+              const assetOpening = isAssetOpeningTx(t);
+              const positive = topup || assetTopup || assetOpening;
               return (
                 <div key={t.id} className="card2 p-3 flex items-center justify-between">
                   <div>
-                    <p className="text-sm">{t.note || sub?.name || cat?.name || (assetTopup ? "Penambahan saldo aset" : topup ? "Tambahan dana" : "Pengeluaran")}</p>
+                    <p className="text-sm">{t.note || sub?.name || cat?.name || (assetOpening ? "Saldo awal aset" : assetTopup ? "Penambahan saldo aset" : topup ? "Tambahan dana" : "Pengeluaran")}</p>
                     <p className="muted text-xs">
                       {t.date}
                       {cat ? ` · ${cat.name}` : ""}
                       {sub ? ` · ${sub.name}` : ""}
-                      {!cat && topup ? " · Seluruh alokasi" : assetTopup ? " · Penambahan aset" : ""}
+                      {!cat && topup ? " · Seluruh alokasi" : assetOpening ? " · Saldo awal aset" : assetTopup ? " · Penambahan aset" : ""}
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
@@ -2729,8 +2735,9 @@ function EditTransactionModal({ tx, cat, onClose, onSave }) {
   const [date, setDate] = useState(tx.date);
   const [error, setError] = useState("");
   const topup = isTopupTx(tx);
+  const assetOpening = isAssetOpeningTx(tx);
   const withdraw = isWithdrawTx(tx);
-  const txLabel = withdraw ? "Tarik Dana" : topup ? "Tambahan Dana" : (cat && cat.isAsset) ? "Setor" : "Pengeluaran";
+  const txLabel = withdraw ? "Tarik Dana" : topup ? "Tambahan Dana" : assetOpening ? "Saldo Awal Aset" : (cat && cat.isAsset) ? "Setor" : "Pengeluaran";
 
   const submit = () => {
     const amt = Number(amount);
