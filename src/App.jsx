@@ -18,7 +18,8 @@ const isExpenseTx = (t) => t.type !== "topup" && t.type !== "withdraw" && t.type
 const isTopupTx = (t) => t.type === "topup";
 const isWithdrawTx = (t) => t.type === "withdraw";
 const isAssetTopupTx = (t) => t.type === "asset_topup" || t.directAsset;
-const isDepositTx = (t) => t.type === "expense" || isAssetTopupTx(t) || !t.type; // "setor" into an asset category
+const isAssetDepositTx = (t) => t.type === "expense" || isAssetTopupTx(t) || !t.type;
+const isDepositTx = (t) => isAssetDepositTx(t); // "setor" into an asset category
 const monthLabelFor = (mKey) => {
   const [y, m] = mKey.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("id-ID", { month: "long", year: "numeric" });
@@ -1327,6 +1328,7 @@ function Dashboard({ user, transactions, onOpenCategory, onLogout, onEditAlloc, 
 
   const spentFor = (catId) => expenses.filter((t) => t.categoryId === catId && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
   const withdrawFor = (catId) => monthTx.filter((t) => t.categoryId === catId && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
+  const assetDepositFor = (catId) => monthTx.filter((t) => t.categoryId === catId && isAssetDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const directTopupFor = (catId) => topups.filter((t) => t.categoryId === catId && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const subTopupFor = (catId) => topups.filter((t) => t.categoryId === catId && t.subId).reduce((s, t) => s + Number(t.amount), 0);
 
@@ -1409,7 +1411,7 @@ function Dashboard({ user, transactions, onOpenCategory, onLogout, onEditAlloc, 
           <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
             {user.categories.map((c, i) => {
               const allocated = effectiveIncome * c.percent / 100 + directTopupFor(c.id) + subTopupFor(c.id);
-              const spent = spentFor(c.id) - (c.isAsset ? withdrawFor(c.id) : 0);
+              const spent = c.isAsset ? assetDepositFor(c.id) - withdrawFor(c.id) : spentFor(c.id);
               const pct = allocated > 0 ? (spent / allocated) * 100 : 0;
               return (
                 <button
@@ -1492,9 +1494,10 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const baseAllocated = effectiveIncome * cat.percent / 100;
   const allocated = baseAllocated + directTopup + subTopupTotal;
   const monthTx = allMonthTx.filter((t) => t.categoryId === cat.id);
-  const spent = monthTx.filter(isExpenseTx).reduce((s, t) => s + Number(t.amount), 0);
+  const deposited = monthTx.filter(isAssetDepositTx).reduce((s, t) => s + Number(t.amount), 0);
+  const spent = isAsset ? deposited : monthTx.filter(isExpenseTx).reduce((s, t) => s + Number(t.amount), 0);
   const withdrawn = monthTx.filter(isWithdrawTx).reduce((s, t) => s + Number(t.amount), 0);
-  const netAssetMovement = spent - withdrawn;
+  const netAssetMovement = isAsset ? deposited - withdrawn : spent;
   const remaining = allocated - (isAsset ? netAssetMovement : spent);
   const catPct = allocated > 0 ? ((isAsset ? netAssetMovement : spent) / allocated) * 100 : 0;
   const catSaldo = assetBalance(transactions, cat.id);
@@ -1508,7 +1511,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
     : history;
   const recurring = (user.recurring || []).filter((r) => r.categoryId === cat.id);
 
-  const spentForSub = (sid) => monthTx.filter((t) => t.subId === sid && isExpenseTx(t) && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
+  const spentForSub = (sid) => monthTx.filter((t) => t.subId === sid && (isAsset ? isAssetDepositTx(t) : isExpenseTx(t)) && (isAsset || !t.directAsset)).reduce((s, t) => s + Number(t.amount), 0);
   const withdrawnForSub = (sid) => monthTx.filter((t) => t.subId === sid && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const topupForSub = (sid) => monthTx.filter((t) => t.subId === sid && isTopupTx(t)).reduce((s, t) => s + Number(t.amount), 0);
 
@@ -1942,8 +1945,10 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
   const monthT = transactions.filter((t) => monthKey(t.date) === selected);
   const expenses = monthT.filter(isExpenseTx);
   const topups = monthT.filter(isTopupTx);
+  const assetTopups = monthT.filter(isAssetTopupTx);
   const globalTopup = topups.filter((t) => !t.categoryId).reduce((s, t) => s + Number(t.amount), 0);
   const totalTopup = topups.reduce((s, t) => s + Number(t.amount), 0);
+  const totalAssetTopup = assetTopups.reduce((s, t) => s + Number(t.amount), 0);
   const selectedIncome = getIncomeForMonth(user, selected);
   const hasIncomeRecord = Object.prototype.hasOwnProperty.call(user.monthlyIncomes || {}, selected);
   const effectiveIncome = selectedIncome + globalTopup;
@@ -1956,6 +1961,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
   const directTopupForCat = (catId) => topups.filter((t) => t.categoryId === catId && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const topupForSub = (catId, subId) => topups.filter((t) => t.categoryId === catId && t.subId === subId).reduce((s, t) => s + Number(t.amount), 0);
   const spentForCat = (catId) => expenses.filter((t) => t.categoryId === catId && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
+  const assetDepositForCat = (catId) => monthT.filter((t) => t.categoryId === catId && isAssetDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const spentForSub = (catId, subId) => expenses.filter((t) => t.categoryId === catId && t.subId === subId && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
 
   const monthTxSorted = [...monthT].sort((a, b) => (a.date < b.date ? 1 : -1));
@@ -2037,6 +2043,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
               <p className="muted text-xs uppercase tracking-wide">Income efektif</p>
               <p className="tabular" style={{ fontWeight: 700 }}>{rupiah(cashIncome)}</p>
               {totalTopup > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--teal)" }}>termasuk +{rupiah(totalTopup)} tambahan</p>}
+              {totalAssetTopup > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--gold)" }}>termasuk +{rupiah(totalAssetTopup)} penambahan aset</p>}
               {!hasIncomeRecord && <p className="text-xs mt-0.5 muted">*belum ada input income khusus bulan ini, pakai income terakhir yang diketahui</p>}
             </div>
             <div>
@@ -2059,9 +2066,9 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
               const subTopupTotal = topups.filter((t) => t.categoryId === c.id && t.subId).reduce((s, t) => s + Number(t.amount), 0);
               const baseAllocated = effectiveIncome * c.percent / 100;
               const allocated = baseAllocated + directTopup + subTopupTotal;
-              const spent = spentForCat(c.id) - (c.isAsset
-                ? monthT.filter((t) => t.categoryId === c.id && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0)
-                : 0);
+              const spent = c.isAsset
+                ? assetDepositForCat(c.id) - monthT.filter((t) => t.categoryId === c.id && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0)
+                : spentForCat(c.id);
               const pct = allocated > 0 ? (spent / allocated) * 100 : 0;
               const expanded = expandedCat === c.id;
               return (
@@ -2127,19 +2134,21 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
               const cat = user.categories.find((c) => c.id === t.categoryId);
               const sub = cat?.subs.find((s) => s.id === t.subId);
               const topup = isTopupTx(t);
+              const assetTopup = isAssetTopupTx(t);
+              const positive = topup || assetTopup;
               return (
                 <div key={t.id} className="card2 p-3 flex items-center justify-between">
                   <div>
-                    <p className="text-sm">{t.note || sub?.name || cat?.name || (topup ? "Tambahan dana" : "Pengeluaran")}</p>
+                    <p className="text-sm">{t.note || sub?.name || cat?.name || (assetTopup ? "Penambahan saldo aset" : topup ? "Tambahan dana" : "Pengeluaran")}</p>
                     <p className="muted text-xs">
                       {t.date}
                       {cat ? ` · ${cat.name}` : ""}
                       {sub ? ` · ${sub.name}` : ""}
-                      {!cat && topup ? " · Seluruh alokasi" : ""}
+                      {!cat && topup ? " · Seluruh alokasi" : assetTopup ? " · Penambahan aset" : ""}
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className="transaction-amount tabular" style={{ color: topup ? "var(--teal)" : "var(--rose)" }}>{topup ? "+" : "-"}{rupiah(t.amount)}</span>
+                    <span className="transaction-amount tabular" style={{ color: positive ? "var(--teal)" : "var(--rose)" }}>{positive ? "+" : "-"}{rupiah(t.amount)}</span>
                     <button className="icon-btn" onClick={() => setEditingTx(t)}><Pencil size={14} className="muted" /></button>
                     <button className="icon-btn" onClick={() => onDeleteTx(t.id)}><X size={15} className="muted" /></button>
                   </div>
