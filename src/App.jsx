@@ -1699,7 +1699,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
                 {cat.subs.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             )}
-            <input style={{ maxWidth: 160 }} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <input className="transaction-date-input" style={{ maxWidth: 160 }} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
             <input
               style={{ flex: 1, minWidth: 160 }}
               placeholder="Catatan (opsional)"
@@ -1790,7 +1790,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
                   <div className="flex items-center gap-3">
                     <span className="transaction-amount tabular" style={{ color: positive ? "var(--teal)" : "var(--rose)" }}>{positive ? "+" : "-"}{rupiah(t.amount)}</span>
                     <button className="icon-btn" onClick={() => setEditingTx(t)}><Pencil size={14} className="muted" /></button>
-                    <button className="icon-btn" onClick={() => onDeleteTx(t.id)}><X size={15} className="muted" /></button>
+                    <button className="icon-btn" onClick={() => { if (window.confirm("Hapus transaksi ini?")) onDeleteTx(t.id); }}><X size={15} className="muted" /></button>
                   </div>
                 </div>
               );
@@ -2163,7 +2163,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
                   <div className="flex items-center gap-3">
                     <span className="transaction-amount tabular" style={{ color: positive ? "var(--teal)" : "var(--rose)" }}>{positive ? "+" : "-"}{rupiah(t.amount)}</span>
                     <button className="icon-btn" onClick={() => setEditingTx(t)}><Pencil size={14} className="muted" /></button>
-                    <button className="icon-btn" onClick={() => onDeleteTx(t.id)}><X size={15} className="muted" /></button>
+                    <button className="icon-btn" onClick={() => { if (window.confirm("Hapus transaksi ini?")) onDeleteTx(t.id); }}><X size={15} className="muted" /></button>
                   </div>
                 </div>
               );
@@ -2772,7 +2772,7 @@ function EditTransactionModal({ tx, cat, onClose, onSave }) {
             </Field>
           )}
           <Field label="Tanggal">
-            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <input className="transaction-date-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
           </Field>
           <Field label="Catatan">
             <input value={note} onChange={(e) => setNote(e.target.value)} onKeyDown={onEnter(submit)} />
@@ -3552,6 +3552,14 @@ const STYLE = `
   border-radius:8px; padding:9px 12px; outline:none; width:100%; font-size:14px;
 }
 .mmp-app input[type="date"]{ min-width:0; max-width:100%; }
+.mmp-app .transaction-date-input{
+  flex:0 1 160px;
+  width:160px;
+  min-width:0;
+  max-width:160px !important;
+  font-size:13px;
+  white-space:nowrap;
+}
 .mmp-app input::placeholder{ color:var(--muted); }
 .mmp-app input:focus, .mmp-app select:focus{ border-color:var(--gold); }
 .mmp-app .btn-primary{
@@ -3648,6 +3656,12 @@ const STYLE = `
   .mmp-app .transaction-form > input[type="date"],
   .mmp-app .transaction-form > input[placeholder*="Catatan"],
   .mmp-app .transaction-form > button{ grid-column:1 / -1; }
+  .mmp-app .transaction-form > .transaction-date-input{
+    width:100%;
+    max-width:100% !important;
+    min-width:0;
+    font-size:13px;
+  }
   .mmp-app .transaction-form > input,
   .mmp-app .transaction-form > select,
   .mmp-app .transaction-form > button{ min-height:42px; }
