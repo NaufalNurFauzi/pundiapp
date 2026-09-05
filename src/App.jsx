@@ -1308,7 +1308,18 @@ function TopBar({ name, onLogout, right }) {
 }
 
 function AppFooter() {
-  return <footer className="app-footer">Developed by <span>@naufalnurf__</span></footer>;
+  return (
+    <footer className="app-footer">
+      Developed by{" "}
+      <a 
+        href="https://instagram.com/naufalnurf__" 
+        target="_blank" 
+        rel="noopener noreferrer"
+      >
+        @naufalnurf__
+      </a>
+    </footer>
+  );
 }
 
 function Dashboard({ user, transactions, onOpenCategory, onLogout, onEditAlloc, onAddMoney, onViewHistory, onOpenSettings, onOpenGoals, onOpenCalculator, onConfirmMonthIncome }) {
@@ -2249,7 +2260,7 @@ function ForgotPasswordModal({ onClose }) {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   onKeyDown={onEnter(checkEmail)}
-                  placeholder="cth. naufal@email.com"
+                  placeholder="contoh@email.com"
                 />
               </Field>
               {error && <div className="flex items-center gap-2 text-sm" style={{ color: "var(--rose)" }}><AlertCircle size={14} /> {error}</div>}
