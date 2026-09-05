@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { supabase } from "./lib/supabase";
+import { appUrl, supabase } from "./lib/supabase";
 import {
   LogIn, UserPlus, ArrowRight, ArrowLeft, Check, Pencil, Plus, Trash2,
   LogOut, Wallet, ChevronRight, AlertCircle, X, Settings, Search,
@@ -996,9 +996,9 @@ function CustomBuilder({ initialCategories, income, onDone, onBack }) {
           <>
             <div className="flex flex-col gap-2 mb-4">
               {activeCat.subs.map((s) => (
-                <div key={s.id} className="card2 p-3 flex items-center justify-between gap-2 anim-fade-up">
+                <div key={s.id} className="card2 p-3 flex items-center justify-between gap-2 anim-fade-up sub-allocation-row">
                   <input
-                    className="flex-1"
+                    className="flex-1 sub-allocation-name"
                     value={s.name}
                     onChange={(e) => setCategories(categories.map((c) => c.id === activeCat.id
                       ? { ...c, subs: c.subs.map((x) => x.id === s.id ? { ...x, name: e.target.value } : x) }
@@ -1231,8 +1231,8 @@ function AllocationEditor({ user, onSave, onCancel }) {
                         </span>
                       </div>
                       {c.subs.map((s) => (
-                        <div key={s.id} className="flex items-center justify-between gap-2">
-                          <input className="flex-1" value={s.name} onChange={(e) => updateSubName(c.id, s.id, e.target.value)} />
+                        <div key={s.id} className="flex items-center justify-between gap-2 sub-allocation-row">
+                          <input className="flex-1 sub-allocation-name" value={s.name} onChange={(e) => updateSubName(c.id, s.id, e.target.value)} />
                           <PercentOrAmountInput percent={s.percent} base={catAmount} onChangePercent={(p) => updateSubPercent(c.id, s.id, p)} />
                           <span className="sub-allocation-amount tabular text-xs muted" style={{ minWidth: 90, textAlign: "right" }}>{rupiah(catAmount * s.percent / 100)}</span>
                           <button className="icon-btn" onClick={() => removeSub(c.id, s.id)}><Trash2 size={14} color="var(--rose)" /></button>
@@ -1819,9 +1819,21 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
   const [note, setNote] = useState("");
   const [date, setDate] = useState(todayStr());
 
+  const assetCategories = user.categories.filter((c) => c.isAsset);
   const cat = user.categories.find((c) => c.id === categoryId);
 
   const chooseCategory = (id) => { setCategoryId(id); setSubId(""); };
+  const chooseTarget = (nextTarget) => {
+    setTarget(nextTarget);
+    setSubId("");
+    if (nextTarget === "asset") {
+      setCategoryId(assetCategories[0]?.id || "");
+    } else if (nextTarget === "global") {
+      setCategoryId(user.categories[0]?.id || "");
+    } else if (!user.categories.some((category) => category.id === categoryId)) {
+      setCategoryId(user.categories[0]?.id || "");
+    }
+  };
 
   const submit = () => {
     const amt = Number(amount);
@@ -1860,14 +1872,14 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "global")} onClick={() => setTarget("global")}>Seluruh Alokasi</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "category")} onClick={() => setTarget("category")}>Kategori Tertentu</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "sub")} onClick={() => setTarget("sub")}>Sub-alokasi Tertentu</button>
-              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "asset")} onClick={() => { setTarget("asset"); setSubId(""); }}>Saldo Aset</button>
+              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "asset")} onClick={() => chooseTarget("asset")}>Saldo Aset</button>
             </div>
           </Field>
 
           {(target === "category" || target === "sub" || target === "asset") && (
             <Field label="Kategori">
               <select value={categoryId} onChange={(e) => chooseCategory(e.target.value)}>
-               {(target === "asset" ? user.categories.filter((c) => c.isAsset) : user.categories).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+               {(target === "asset" ? assetCategories : user.categories).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </Field>
           )}
@@ -1880,7 +1892,10 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
               </select>
             </Field>
           )}
-          {target === "asset" && <p className="muted text-xs">Dana ini langsung menambah saldo kategori aset dan tidak dihitung sebagai pemakaian alokasi.</p>}
+          {target === "asset" && assetCategories.length > 0 && <p className="muted text-xs">Dana ini langsung menambah saldo kategori aset dan tidak dihitung sebagai pemakaian alokasi.</p>}
+          {target === "asset" && assetCategories.length === 0 && (
+            <p className="text-sm" style={{ color: "var(--rose)" }}>Belum ada kategori Tabungan/Investasi. Tandai kategori sebagai aset lewat Edit Alokasi dulu.</p>
+          )}
           {target === "sub" && cat && cat.subs.length === 0 && (
             <p className="text-sm" style={{ color: "var(--rose)" }}>Kategori ini belum punya sub-alokasi. Tambahkan lewat Edit Alokasi dulu.</p>
           )}
@@ -1898,7 +1913,7 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
           <button
             className="btn-primary flex items-center justify-center gap-2 mt-1"
             onClick={submit}
-            disabled={!(Number(amount) > 0) || ((target === "sub" || target === "asset") && !cat)}
+            disabled={!(Number(amount) > 0) || ((target === "sub" || target === "asset") && !cat) || (target === "asset" && !cat?.isAsset)}
           >
             <Plus size={16} /> Tambahkan Dana
           </button>
@@ -3072,6 +3087,17 @@ export default function App() {
       setAuthError(error.message);
       setSessionChecked(true);
     });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === "SIGNED_IN" && session && !user) {
+        try {
+          await loadAccount(session.user.id);
+        } catch (error) {
+          setAuthError(error.message);
+        }
+      }
+    });
+    return () => subscription.unsubscribe();
   }, []);
 
   const toggleTheme = () => {
@@ -3174,7 +3200,10 @@ export default function App() {
     const { data: authData, error } = await supabase.auth.signUp({
       email: email.trim(),
       password,
-      options: { data: { username, securityQuestion, securityAnswer } },
+      options: {
+        emailRedirectTo: appUrl,
+        data: { username, securityQuestion, securityAnswer },
+      },
     });
     if (error) { setBusy(false); setAuthError(error.message); return; }
     if (!authData.session) {
@@ -3633,6 +3662,24 @@ const STYLE = `
 
   .mmp-app .flex.items-center.justify-between.gap-2 > input,
   .mmp-app .flex.items-center.justify-between.gap-2 > .flex-1{ min-width:0; }
+  .mmp-app .sub-allocation-row{
+    display:grid;
+    grid-template-columns:minmax(0, 1fr) auto auto;
+    align-items:center;
+  }
+  .mmp-app .sub-allocation-row > .sub-allocation-name{
+    grid-column:1 / -1;
+    min-width:0;
+    width:100%;
+  }
+  .mmp-app .sub-allocation-row > .flex.items-center.gap-1\\.5:has(.unit-toggle){
+    width:auto;
+    min-width:0;
+  }
+  .mmp-app .sub-allocation-row > .sub-allocation-amount{
+    min-width:0 !important;
+    white-space:nowrap;
+  }
   .mmp-app .tabular{ overflow-wrap:anywhere; }
   .mmp-app textarea{ max-width:100%; }
 }

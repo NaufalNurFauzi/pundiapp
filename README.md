@@ -53,7 +53,9 @@ transaksi.
 
 Jika **Confirm email** aktif, pengguna harus memverifikasi email sebelum bisa
 masuk. Atur URL redirect di Supabase **Authentication → URL Configuration** ke
-URL aplikasi (misalnya `http://localhost:5173`).
+URL website production, lalu tambahkan URL development jika diperlukan (misalnya
+`http://localhost:5173`). Untuk deployment, isi `VITE_APP_URL` dengan URL publik
+aplikasi, misalnya `https://pundi.example.com`.
 
 ## ⚠️ Penyimpanan Lokal
 
