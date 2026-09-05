@@ -1432,11 +1432,12 @@ function Dashboard({ user, transactions, onOpenCategory, onLogout, onEditAlloc, 
                   <p className="muted text-xs mb-1">{fmtPercent(c.percent)}% dari income</p>
                   {c.isAsset ? (
                     <>
-                      <p className="tabular" style={{ fontWeight: 700, color: "var(--teal)" }}>{rupiah(assetBalance(transactions, c.id))} <span className="muted font-normal text-xs">saldo</span></p>
+                      <p className="muted text-xs">Saldo total aset</p>
+                      <p className="tabular" style={{ fontWeight: 700, color: "var(--teal)" }}>{rupiah(assetBalance(transactions, c.id))}</p>
                       <ProgressBar percent={pct} color={pct > 100 ? "var(--rose)" : pct >= 80 ? "#D9A441" : COLORS[i % COLORS.length]} />
                       <div className="flex justify-between mt-2 text-xs tabular">
-                        <span className="muted">{rupiah(spent)} disetor bulan ini</span>
-                        <span className="muted">target {rupiah(allocated)}</span>
+                        <span className="muted">Setor bulan ini {rupiah(spent)}</span>
+                        <span className="muted">alokasi {rupiah(allocated)}</span>
                       </div>
                     </>
                   ) : (
@@ -1583,14 +1584,18 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
             <>
               <div className="flex flex-wrap gap-8">
                 <div>
-                  <p className="muted text-xs uppercase tracking-wide">Target alokasi bulan ini</p>
+                  <p className="muted text-xs uppercase tracking-wide">Saldo total aset</p>
+                  <p className="display tabular" style={{ fontSize: 20, fontWeight: 700, color: "var(--teal)" }}>{rupiah(catSaldo)}</p>
+                </div>
+                <div>
+                  <p className="muted text-xs uppercase tracking-wide">Alokasi bulan ini</p>
                   <p className="tabular" style={{ fontWeight: 700 }}>{rupiah(allocated)}</p>
                   {directTopup > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--teal)" }}>+{rupiah(directTopup)} tambahan</p>}
                 </div>
               </div>
               <p className="muted text-xs mt-3">
-                Uang yang disetor ke sini bukan "hilang" seperti pengeluaran biasa — ini menambah saldo asetmu. Saat ditarik,
-                saldo aset berkurang dan dana kembali ke saldo yang bisa digunakan.
+                Saldo total mencakup saldo awal dan seluruh setoran aset. Alokasi bulan ini hanya menghitung setoran pada bulan aktif,
+                sehingga saldo awal tidak membuat progres bulanan melebihi target.
               </p>
               <div className="mt-3"><ProgressBar percent={catPct} color={catPct > 100 ? "var(--rose)" : catPct >= 80 ? "#D9A441" : "var(--gold)"} /></div>
               {catPct >= 80 && catPct <= 100 && <p className="text-xs mt-1" style={{ color: "#D9A441" }}>⚠ Setoran bulan ini hampir mencapai target alokasi</p>}
@@ -2090,7 +2095,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
                       <ChevronRight size={14} className="muted" style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
                     </span>
                     <span className="tabular text-xs muted">
-                      {c.isAsset ? <>saldo {rupiah(assetBalance(transactions, c.id))}</> : <>{rupiah(spent)} / {rupiah(allocated)}</>}
+                      {c.isAsset ? <>saldo total {rupiah(assetBalance(transactions, c.id))}</> : <>{rupiah(spent)} / {rupiah(allocated)}</>}
                     </span>
                   </button>
                   <div className="mt-2"><ProgressBar percent={pct} color={pct > 100 ? "var(--rose)" : pct >= 80 ? "#D9A441" : COLORS[i % COLORS.length]} /></div>
