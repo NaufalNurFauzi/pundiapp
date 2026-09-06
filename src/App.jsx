@@ -260,40 +260,41 @@ function SpendingTrendChart({ transactions, currentMonth }) {
 }
 
 /* Daily Spending Chart for CategoryDetail */
-function DailySpendingChart({ monthTx, monthKey }) {
+function DailySpendingChart({ monthTx, monthKey, subCategories = [] }) {
   const [hoveredDay, setHoveredDay] = useState(null);
-  // Get last day of the month
   const [year, month] = monthKey.split("-").map(Number);
   const lastDay = new Date(year, month, 0).getDate();
-  
-  // Calculate daily spending
-  const dailySpending = Array.from({ length: lastDay }, (_, i) => {
-    const day = i + 1;
-    const dateStr = `${monthKey}-${String(day).padStart(2, "0")}`;
-    const dayTotal = monthTx
-      .filter(t => t.date === dateStr && (t.type === "expense" || !t.type))
-      .reduce((sum, t) => sum + Number(t.amount), 0);
-    return { day, total: dayTotal };
+
+  const colors = ["#C9A24B", "#3E8E7E", "#C4604A", "#6E8FB0", "#9B7EBD", "#7FAE8B", "#B58AC4"];
+  const spendingTx = monthTx.filter((t) => t.type === "expense" || !t.type);
+  const subIds = Array.from(new Set(spendingTx.map((t) => t.subId || "__category")));
+  const series = subIds.map((subId, index) => {
+    const subName = subId === "__category" ? "Tanpa sub-alokasi" : (subCategories.find((sub) => sub.id === subId)?.name || subId);
+    const values = Array.from({ length: lastDay }, (_, dayIndex) => {
+      const day = dayIndex + 1;
+      const dateStr = `${monthKey}-${String(day).padStart(2, "0")}`;
+      return spendingTx
+        .filter((t) => (t.subId || "__category") === subId && t.date === dateStr)
+        .reduce((sum, t) => sum + Number(t.amount), 0);
+    });
+    return { id: subId, name: subName, color: colors[index % colors.length], values };
   });
-  const avgDaily = dailySpending.reduce((sum, day) => sum + day.total, 0) / lastDay;
-  const maxDaily = Math.max(...dailySpending.map((d) => d.total), 1);
+  const dailyTotals = Array.from({ length: lastDay }, (_, index) => series.reduce((sum, item) => sum + item.values[index], 0));
+  const totalSpending = dailyTotals.reduce((sum, value) => sum + value, 0);
+  const avgDaily = totalSpending / lastDay;
+  const maxDaily = Math.max(...series.flatMap((item) => item.values), 1);
   const chartHeight = 120;
-  const chartLeft = 40;
-  const chartRight = 395;
+  const chartLeft = 52;
+  const chartRight = 408;
   const chartWidth = chartRight - chartLeft;
-  const points = dailySpending.map((item, index) => ({
-    ...item,
+  const pointsFor = (item) => item.values.map((value, index) => ({
+    day: index + 1,
+    value,
     x: chartLeft + (index / Math.max(lastDay - 1, 1)) * chartWidth,
-    y: chartHeight - (item.total / maxDaily) * chartHeight,
+    y: chartHeight - (value / maxDaily) * chartHeight,
   }));
-  const hoveredPoint = hoveredDay ? points.find((point) => point.day === hoveredDay) : null;
-  const hoveredDate = hoveredPoint
-    ? `${monthKey}-${String(hoveredPoint.day).padStart(2, "0")}`
-    : "";
-  const hoveredTransactions = hoveredDate
-    ? monthTx.filter((t) => t.date === hoveredDate && (t.type === "expense" || !t.type))
-    : [];
-  const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+  const hoveredDate = hoveredDay ? `${monthKey}-${String(hoveredDay).padStart(2, "0")}` : "";
+  const hoveredValues = series.map((item) => ({ ...item, value: item.values[(hoveredDay || 1) - 1] || 0 }));
   const labelStep = lastDay <= 10 ? 1 : 5;
 
   return (
@@ -307,110 +308,78 @@ function DailySpendingChart({ monthTx, monthKey }) {
             <p className="muted">Rata-rata harian</p>
             <p className="font-bold tabular">{rupiah(avgDaily)}</p>
           </div>
-          <div>
-            <p className="muted">Total bulan</p>
-            <p className="font-bold tabular" style={{ color: "var(--rose)" }}>{rupiah(dailySpending.reduce((s, d) => s + d.total, 0))}</p>
-          </div>
+          <div><p className="muted">Total bulan</p><p className="font-bold tabular" style={{ color: "var(--rose)" }}>{rupiah(totalSpending)}</p></div>
         </div>
       </div>
 
-      <svg width="100%" height={chartHeight + 40} viewBox={`0 0 400 ${chartHeight + 40}`} preserveAspectRatio="xMidYMid meet">
-        {/* Grid lines */}
+      <div className="chart-legend flex flex-wrap gap-x-4 gap-y-1 text-xs muted">
+        {series.map((item) => <span key={item.id} className="flex items-center gap-1.5"><i style={{ width: 9, height: 9, borderRadius: "50%", background: item.color }} />{item.name}</span>)}
+      </div>
+      <svg width="100%" height={chartHeight + 40} viewBox={`0 0 440 ${chartHeight + 40}`} preserveAspectRatio="xMidYMid meet" style={{ overflow: "visible" }}>
         {[0, 0.25, 0.5, 0.75, 1].map((ratio, i) => (
           <line
             key={`grid-${i}`}
-            x1="40"
+            x1={chartLeft}
             y1={chartHeight - chartHeight * ratio}
-            x2="400"
+            x2={chartRight}
             y2={chartHeight - chartHeight * ratio}
             stroke="var(--border)"
             strokeWidth="0.5"
             opacity="0.3"
           />
         ))}
-
-        <path d={path} fill="none" stroke="var(--gold)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-        {points.map((point) => {
-          const isHovered = point.day === hoveredDay;
-          const pointDate = `${monthKey}-${String(point.day).padStart(2, "0")}`;
-          return (
-            <g
-              key={`point-${point.day}`}
-              onMouseEnter={() => setHoveredDay(point.day)}
-              onMouseLeave={() => setHoveredDay(null)}
-              style={{ cursor: "pointer" }}
-            >
-              <rect x={point.x - 8} y="0" width="16" height={chartHeight} fill="transparent" />
-              {point.total > 0 && (
-                <circle
-                  cx={point.x}
-                  cy={point.y}
-                  r={isHovered ? 5 : 3}
-                  fill="var(--gold)"
-                  stroke={isHovered ? "var(--text)" : "none"}
-                  strokeWidth="1.5"
-                />
-              )}
-              <title>{`${pointDate}: ${rupiah(point.total)}`}</title>
-            </g>
-          );
+        {series.map((item) => {
+          const points = pointsFor(item);
+          const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+          return <path key={item.id} d={path} fill="none" stroke={item.color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />;
         })}
-        {hoveredPoint && (
+        {hoveredDay && (
           <g pointerEvents="none">
             <rect
-              x={hoveredPoint.x > 280 ? hoveredPoint.x - 132 : hoveredPoint.x + 8}
+              x={hoveredDay > lastDay * 0.7 ? 250 : 62}
               y="6"
-              width="124"
-              height={Math.min(72, 30 + hoveredTransactions.slice(0, 2).length * 17)}
+              width="170"
+              height={Math.min(100, 28 + hoveredValues.length * 14)}
               rx="6"
               fill="var(--surface)"
               stroke="var(--gold)"
               strokeWidth="1"
             />
             <text
-              x={hoveredPoint.x > 280 ? hoveredPoint.x - 124 : hoveredPoint.x + 16}
+              x={hoveredDay > lastDay * 0.7 ? 260 : 72}
               y="20"
               fontSize="10"
               fill="var(--muted)"
             >
               {hoveredDate}
             </text>
-            <text
-              x={hoveredPoint.x > 280 ? hoveredPoint.x - 124 : hoveredPoint.x + 16}
-              y="34"
-              fontSize="11"
-              fill="var(--text)"
-              fontWeight="700"
-            >
-              {rupiah(hoveredPoint.total)}
-            </text>
-            {hoveredTransactions.slice(0, 2).map((transaction, index) => (
+            {hoveredValues.filter((item) => item.value > 0).slice(0, 5).map((item, index) => (
               <text
-                key={`${transaction.id}-detail`}
-                x={hoveredPoint.x > 280 ? hoveredPoint.x - 124 : hoveredPoint.x + 16}
-                y={49 + index * 14}
+                key={`${item.id}-detail`}
+                x={hoveredDay > lastDay * 0.7 ? 260 : 72}
+                y={34 + index * 14}
                 fontSize="9"
-                fill="var(--muted)"
+                fill={item.color}
               >
-                {(transaction.note || "Pengeluaran").slice(0, 19)}
+                {`${item.name}: ${rupiah(item.value)}`}
               </text>
             ))}
           </g>
         )}
 
         {/* X-axis labels */}
-        {points.filter((point) => point.day % labelStep === 0 || point.day === 1 || point.day === lastDay).map((point) => {
+        {Array.from({ length: lastDay }, (_, index) => index + 1).filter((day) => day % labelStep === 0 || day === 1 || day === lastDay).map((day) => {
           return (
             <text
-              key={`label-${point.day}`}
-              x={point.x}
+              key={`label-${day}`}
+              x={chartLeft + (day - 1) / Math.max(lastDay - 1, 1) * chartWidth}
               y={chartHeight + 20}
               textAnchor="middle"
               fontSize="11"
               fill="var(--muted)"
               className="muted"
             >
-              {point.day}
+              {day}
             </text>
           );
         })}
@@ -422,7 +391,7 @@ function DailySpendingChart({ monthTx, monthKey }) {
           return (
             <text
               key={`y-label-${i}`}
-              x="30"
+              x="45"
               y={chartHeight - chartHeight * ratio + 3}
               textAnchor="end"
               fontSize="10"
@@ -1776,7 +1745,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
 
         {!isAsset && (
           <div className="card p-6">
-            <DailySpendingChart monthTx={monthTx} monthKey={activeMonth} />
+            <DailySpendingChart monthTx={monthTx} monthKey={activeMonth} subCategories={cat.subs} />
           </div>
         )}
 
