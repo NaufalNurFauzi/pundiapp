@@ -6,6 +6,7 @@ create table if not exists public.profiles (
   age integer,
   income numeric,
   monthly_incomes jsonb not null default '{}'::jsonb,
+  monthly_income_prompt_dismissed jsonb not null default '{}'::jsonb,
   strategy_mode text,
   categories jsonb not null default '[]'::jsonb,
   recurring jsonb not null default '[]'::jsonb,
@@ -31,6 +32,7 @@ create table if not exists public.transactions (
 );
 
 alter table public.transactions add column if not exists direct_asset boolean not null default false;
+alter table public.profiles add column if not exists monthly_income_prompt_dismissed jsonb not null default '{}'::jsonb;
 
 create or replace function public.handle_new_user()
 returns trigger

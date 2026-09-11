@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { appUrl, supabase } from "./lib/supabase";
 import {
   LogIn, UserPlus, ArrowRight, ArrowLeft, Check, Pencil, Plus, Trash2,
@@ -38,6 +38,12 @@ function getActiveMonth(user) {
 function getIncomeForMonth(user, mKey) {
   const v = (user.monthlyIncomes || {})[mKey];
   return typeof v === "number" ? v : (user.income || 0);
+}
+
+function getMonthlyPromptDismissals(user) {
+  return user.monthlyIncomePromptDismissed && typeof user.monthlyIncomePromptDismissed === "object"
+    ? user.monthlyIncomePromptDismissed
+    : {};
 }
 
 const COLORS = ["#C9A24B", "#3E8E7E", "#C4604A", "#6E8FB0", "#9B7EBD", "#7FAE8B", "#B58AC4"];
@@ -615,7 +621,7 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
                   value={username}
                   onChange={(e) => setUsername(e.target.value.replace(/\s/g, ""))}
                   onKeyDown={onEnter(submit)}
-                  placeholder="cth. naufal"
+                  placeholder="cth. username123"
                 />
                 {usernameStatus === "checking" && <span className="muted text-xs">Mengecek ketersediaan...</span>}
                 {usernameStatus === "available" && <span className="text-xs" style={{ color: "var(--teal)" }}>Username tersedia.</span>}
@@ -1291,10 +1297,11 @@ function AppFooter() {
   );
 }
 
-function Dashboard({ user, transactions, onOpenCategory, onLogout, onEditAlloc, onAddMoney, onViewHistory, onOpenSettings, onOpenGoals, onOpenCalculator, onConfirmMonthIncome }) {
+function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout, onEditAlloc, onAddMoney, onViewHistory, onOpenSettings, onOpenGoals, onOpenCalculator, onConfirmMonthIncome }) {
   const activeMonth = getActiveMonth(user);
   const realCurrentMonth = nowMonthKey();
-  const needsNewMonthIncome = realCurrentMonth !== activeMonth;
+  const promptDismissed = !!getMonthlyPromptDismissals(user)[realCurrentMonth];
+  const needsNewMonthIncome = accountLoaded && realCurrentMonth !== activeMonth && !promptDismissed;
   const income = getIncomeForMonth(user, activeMonth);
 
   const monthTx = transactions.filter((t) => monthKey(t.date) === activeMonth);
@@ -3080,6 +3087,10 @@ export default function App() {
   const [showNewMonthIncome, setShowNewMonthIncome] = useState(false);
   const [theme, setTheme] = useState("dark");
   const [sessionChecked, setSessionChecked] = useState(false);
+  const [accountLoaded, setAccountLoaded] = useState(false);
+  const txSaveQueueRef = useRef(Promise.resolve());
+  const profileSaveQueueRef = useRef(Promise.resolve());
+  const accountLoadRef = useRef(null);
 
   useEffect(() => {
     (async () => {
@@ -3114,15 +3125,21 @@ export default function App() {
   };
 
   const loadAccount = async (userId) => {
+    if (accountLoadRef.current?.userId === userId && accountLoadRef.current.promise) {
+      return accountLoadRef.current.promise;
+    }
+    const loadPromise = (async () => {
     const [{ data: profile, error: profileError }, { data: tx, error: txError }] = await Promise.all([
       supabase.from("profiles").select("*").eq("id", userId).single(),
       supabase.from("transactions").select("*").eq("user_id", userId).order("date", { ascending: true }),
     ]);
     if (profileError) throw profileError;
     if (txError) throw txError;
+    if (!profile || profile.id !== userId) throw new Error("Profil akun tidak ditemukan.");
     setUser({
       ...profile,
       monthlyIncomes: profile.monthly_incomes || {},
+      monthlyIncomePromptDismissed: profile.monthly_income_prompt_dismissed || {},
       strategyMode: profile.strategy_mode,
       passwordHash: undefined,
       securityQuestion: profile.security_question,
@@ -3135,6 +3152,17 @@ export default function App() {
       directAsset: !!direct_asset,
       amount: Number(item.amount),
     })));
+    setAccountLoaded(true);
+    })();
+    accountLoadRef.current = { userId, promise: loadPromise };
+    try {
+      return await loadPromise;
+    } catch (error) {
+      setAccountLoaded(false);
+      throw error;
+    } finally {
+      if (accountLoadRef.current?.promise === loadPromise) accountLoadRef.current = null;
+    }
   };
 
   const profilePayload = (u) => ({
@@ -3145,6 +3173,7 @@ export default function App() {
     age: u.age || null,
     income: u.income || null,
     monthly_incomes: u.monthlyIncomes || {},
+    monthly_income_prompt_dismissed: getMonthlyPromptDismissals(u),
     strategy_mode: u.strategyMode || null,
     categories: u.categories || [],
     recurring: u.recurring || [],
@@ -3156,13 +3185,22 @@ export default function App() {
   });
 
   const persistUser = async (u) => {
-    const { error } = await supabase.from("profiles").upsert(profilePayload(u));
-    if (error) console.error("profile save failed", error);
+    const save = profileSaveQueueRef.current.then(async () => {
+      const { error } = await supabase.from("profiles").upsert(profilePayload(u));
+      if (error) throw error;
+    });
+    profileSaveQueueRef.current = save.catch(() => {});
+    try {
+      await save;
+    } catch (error) {
+      console.error("profile save failed", error);
+      setAuthError(`Perubahan akun gagal disimpan: ${error.message}`);
+      throw error;
+    }
   };
 
-  const persistTx = async (userId, tx) => {
-    const rows = tx.map((item) => ({
-      id: item.id,
+  const transactionRow = (userId, item) => ({
+    id: item.id,
       user_id: userId,
       date: item.date,
       type: item.type || "expense",
@@ -3171,19 +3209,38 @@ export default function App() {
       direct_asset: !!item.directAsset,
       note: item.note || null,
       amount: Number(item.amount),
-    }));
-    const { error: deleteError } = await supabase.from("transactions").delete().eq("user_id", userId);
-    if (deleteError) console.error("transaction cleanup failed", deleteError);
-    if (rows.length) {
-      const { error } = await supabase.from("transactions").insert(rows);
-      if (error) console.error("transaction save failed", error);
-    }
+  });
+
+  const enqueueTransactionSave = (userId, operation) => {
+    const save = txSaveQueueRef.current.then(async () => {
+      const { error } = await operation();
+      if (error) throw error;
+    });
+    txSaveQueueRef.current = save.catch(() => {});
+    return save.catch(async (error) => {
+      console.error("transaction save failed", error);
+      setAuthError(`Perubahan transaksi gagal disimpan: ${error.message}`);
+      try {
+        await loadAccount(userId);
+      } catch (reloadError) {
+        setAuthError(`Data akun gagal dimuat ulang: ${reloadError.message}`);
+      }
+      throw error;
+    });
   };
+
+  const replaceTransactions = (userId, tx) => enqueueTransactionSave(userId, async () => {
+    const { error: deleteError } = await supabase.from("transactions").delete().eq("user_id", userId);
+    if (deleteError) return { error: deleteError };
+    const rows = tx.map((item) => transactionRow(userId, item));
+    if (!rows.length) return { error: null };
+    return supabase.from("transactions").insert(rows);
+  });
 
   const updateUser = (patch) => {
     setUser((prev) => {
       const next = { ...prev, ...patch };
-      void persistUser(next);
+      void persistUser(next).catch(() => {});
       return next;
     });
   };
@@ -3233,6 +3290,7 @@ export default function App() {
     const { error: profileError } = await supabase.from("profiles").upsert(profilePayload(newUser));
     if (profileError) { setBusy(false); setAuthError(profileError.message); return; }
     setBusy(false);
+    setAccountLoaded(true);
     setTransactions([]);
     setPendingUser(newUser); // show welcome notice before entering the app
   };
@@ -3241,6 +3299,7 @@ export default function App() {
     void supabase.auth.signOut();
     setUser(null);
     setTransactions([]);
+    setAccountLoaded(false);
     setAuthError("");
     setPage("dashboard");
   };
@@ -3248,21 +3307,21 @@ export default function App() {
   const handleAddTx = (tx) => {
     setTransactions((prev) => {
       const next = [...prev, tx];
-      void persistTx(user.id, next);
+      void enqueueTransactionSave(user.id, () => supabase.from("transactions").upsert(transactionRow(user.id, tx)));
       return next;
     });
   };
   const handleUpdateTx = (updatedTx) => {
     setTransactions((prev) => {
       const next = prev.map((t) => t.id === updatedTx.id ? updatedTx : t);
-      void persistTx(user.id, next);
+      void enqueueTransactionSave(user.id, () => supabase.from("transactions").upsert(transactionRow(user.id, updatedTx)));
       return next;
     });
   };
   const handleDeleteTx = (id) => {
     setTransactions((prev) => {
       const next = prev.filter((t) => t.id !== id);
-      void persistTx(user.id, next);
+      void enqueueTransactionSave(user.id, () => supabase.from("transactions").delete().eq("id", id).eq("user_id", user.id));
       return next;
     });
   };
@@ -3274,6 +3333,7 @@ export default function App() {
       ...user,
       name: "", age: null, income: null,
       monthlyIncomes: {},
+      monthlyIncomePromptDismissed: {},
       strategyMode: null,
       categories: [],
       recurring: [],
@@ -3281,8 +3341,12 @@ export default function App() {
       confirmed: false,
       stage: "onboarding",
     };
-    await persistUser(resetUser);
-    await supabase.from("transactions").delete().eq("user_id", user.id);
+    try {
+      await persistUser(resetUser);
+      await replaceTransactions(user.id, []);
+    } catch (error) {
+      return;
+    }
     setUser(resetUser);
     setTransactions([]);
     setPage("dashboard");
@@ -3294,6 +3358,21 @@ export default function App() {
     updateUser({
       income: amount,
       monthlyIncomes: { ...(user.monthlyIncomes || {}), [mKey]: amount },
+      monthlyIncomePromptDismissed: {
+        ...getMonthlyPromptDismissals(user),
+        [mKey]: false,
+      },
+    });
+    setShowNewMonthIncome(false);
+  };
+
+  const handleDismissMonthIncome = () => {
+    const month = nowMonthKey();
+    updateUser({
+      monthlyIncomePromptDismissed: {
+        ...getMonthlyPromptDismissals(user),
+        [month]: true,
+      },
     });
     setShowNewMonthIncome(false);
   };
@@ -3424,12 +3503,12 @@ export default function App() {
           onImport={(userPatch, tx) => {
             updateUser(userPatch);
             setTransactions(tx);
-            void persistTx(user.id, tx);
+            void replaceTransactions(user.id, tx);
           }}
           onMigrateLocal={(userPatch, tx) => {
             updateUser(userPatch);
             setTransactions(tx);
-            void persistTx(user.id, tx);
+            void replaceTransactions(user.id, tx);
           }}
           onBack={() => setPage("dashboard")}
           onOpenReset={() => setShowResetAccount(true)}
@@ -3462,6 +3541,7 @@ export default function App() {
         <Dashboard
           user={user}
           transactions={transactions}
+          accountLoaded={accountLoaded}
           onOpenCategory={(id) => { setActiveCategoryId(id); setPage("category"); }}
           onEditAlloc={() => setPage("editAlloc")}
           onAddMoney={() => setShowAddMoney(true)}
@@ -3504,7 +3584,7 @@ export default function App() {
       {showNewMonthIncome && (
         <NewMonthIncomeModal
           user={user}
-          onClose={() => setShowNewMonthIncome(false)}
+          onClose={handleDismissMonthIncome}
           onConfirm={handleConfirmMonthIncome}
         />
       )}
