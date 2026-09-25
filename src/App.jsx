@@ -26,24 +26,77 @@ const monthLabelFor = (mKey) => {
   return new Date(y, m - 1, 1).toLocaleDateString("id-ID", { month: "long", year: "numeric" });
 };
 
-/* Income is never auto-carried into a new calendar month. `activeMonth` is the
-   most recent month the user has explicitly confirmed an income for — NOT
-   necessarily today's real month. Everything on the dashboard/category pages
-   is anchored to activeMonth, so last month's numbers keep showing until the
-   user manually confirms this month's income. */
-function getActiveMonth(user) {
-  const months = Object.keys(user.monthlyIncomes || {}).sort();
-  return months.length ? months[months.length - 1] : nowMonthKey();
+const dateAtLocalMidnight = (value) => new Date(`${value}T00:00:00`);
+const dateString = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+const dateLabel = (value) => dateAtLocalMidnight(value).toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" });
+const addDays = (value, days) => {
+  const date = dateAtLocalMidnight(value);
+  date.setDate(date.getDate() + days);
+  return dateString(date);
+};
+
+/* New salary periods coexist with legacy calendar-month income records. */
+function getSalaryPeriods(user) {
+  const savedPeriods = Array.isArray(user.salaryPeriods) ? user.salaryPeriods : [];
+  const legacyPeriods = Object.entries(user.monthlyIncomes || {}).sort(([a], [b]) => a.localeCompare(b)).filter(([month]) =>
+    /^\d{4}-\d{2}$/.test(month) && !savedPeriods.some((period) => period.id === `legacy-${month}` || period.startDate === `${month}-01`)
+  ).map(([month, amount]) => ({
+    id: `legacy-${month}`,
+    startDate: `${month}-01`,
+    amount: Number(amount || 0),
+    categories: user.categories,
+    legacy: true,
+  }));
+  return [...legacyPeriods, ...savedPeriods].sort((a, b) => a.startDate.localeCompare(b.startDate));
 }
-function getIncomeForMonth(user, mKey) {
-  const v = (user.monthlyIncomes || {})[mKey];
-  return typeof v === "number" ? v : (user.income || 0);
+function getActivePeriod(user) {
+  const periods = getSalaryPeriods(user);
+  return periods[periods.length - 1] || {
+    id: `unstarted-${todayStr()}`,
+    startDate: todayStr(),
+    amount: Number(user.income || 0),
+    categories: user.categories,
+  };
+}
+function getPeriodEnd(period, periods = []) {
+  const nextPeriod = periods.find((item) => item.startDate > period.startDate);
+  return nextPeriod ? addDays(nextPeriod.startDate, -1) : null;
+}
+function transactionsForPeriod(transactions, period, periods = []) {
+  const endDate = getPeriodEnd(period, periods);
+  return transactions.filter((transaction) => transaction.date >= period.startDate && (!endDate || transaction.date <= endDate));
+}
+function periodCarryoverAmount(period, categoryId, subId = undefined) {
+  return (period.carryovers || [])
+    .filter((item) => item.categoryId === categoryId && (subId === undefined || (item.subId || null) === (subId || null)))
+    .reduce((sum, item) => sum + Number(item.amount || 0), 0);
+}
+function getPeriodCashRemainder(user, transactions, period, beforeDate = null) {
+  const periods = getSalaryPeriods(user);
+  const periodTransactions = transactionsForPeriod(transactions, period, periods)
+    .filter((transaction) => !beforeDate || transaction.date < beforeDate);
+  const additionalIncome = periodTransactions
+    .filter((transaction) => transaction.type === "topup")
+    .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+  const spent = periodTransactions.filter(isExpenseTx)
+    .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+  const carriedIn = (period.carryovers || []).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  return Math.max(0, Number(period.amount || 0) + carriedIn + additionalIncome - spent);
+}
+function isPaydayReminderDue(user, today = todayStr()) {
+  const payDay = Math.max(1, Math.min(31, Number(user.payDay) || 1));
+  const todayDate = dateAtLocalMidnight(today);
+  const expectedDay = Math.min(payDay, new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0).getDate());
+  const expectedDate = dateString(new Date(todayDate.getFullYear(), todayDate.getMonth(), expectedDay));
+  const latestPeriod = getSalaryPeriods(user).at(-1);
+  return today >= expectedDate && (!latestPeriod || latestPeriod.startDate < expectedDate);
 }
 
 function getMonthlyPromptDismissals(user) {
-  return user.monthlyIncomePromptDismissed && typeof user.monthlyIncomePromptDismissed === "object"
+  const values = user.monthlyIncomePromptDismissed && typeof user.monthlyIncomePromptDismissed === "object"
     ? user.monthlyIncomePromptDismissed
     : {};
+  return Object.fromEntries(Object.entries(values).filter(([key]) => !key.startsWith("__pundi_")));
 }
 
 const COLORS = ["#C9A24B", "#3E8E7E", "#C4604A", "#6E8FB0", "#9B7EBD", "#7FAE8B", "#B58AC4"];
@@ -74,17 +127,16 @@ function assetBalance(transactions, catId, subId = undefined) {
   return deposits - withdrawals;
 }
 
-/* True "sisa saldo" — a running cash balance that rolls forward from month to
-  month instead of resetting. Everything up to and including `monthLimit` counts:
-  all confirmed monthly incomes + all topups, minus all expenses (normal spending
-  AND deposits into savings/assets, since those also leave your spendable cash).
-  Asset withdrawals do not change this total balance because they only change the
-  asset balance. Category budgets still reset every month for planning purposes. */
-function cumulativeBalanceUpTo(user, transactions, monthLimit) {
-  const totalIncome = Object.entries(user.monthlyIncomes || {})
-    .filter(([m]) => m <= monthLimit)
-    .reduce((s, [, v]) => s + Number(v || 0), 0);
-  const txUpTo = transactions.filter((t) => monthKey(t.date) <= monthLimit);
+/* True "sisa saldo" — a running cash balance that rolls forward across periods.
+  Everything up to and including `dateLimit` counts: all confirmed salary periods
+  + all topups, minus all expenses (normal spending and deposits into savings/assets,
+  since those also leave your spendable cash). Asset withdrawals do not change this
+  total because they only change the asset balance. */
+function cumulativeBalanceUpTo(user, transactions, dateLimit) {
+  const totalIncome = getSalaryPeriods(user)
+    .filter((period) => period.startDate <= dateLimit)
+    .reduce((sum, period) => sum + Number(period.amount || 0), 0);
+  const txUpTo = transactions.filter((t) => t.date <= dateLimit);
   const totalTopup = txUpTo.filter(isTopupTx).reduce((s, t) => s + Number(t.amount), 0);
   const totalExpense = txUpTo.filter(isExpenseTx).reduce((s, t) => s + Number(t.amount), 0);
   return totalIncome + totalTopup - totalExpense;
@@ -266,28 +318,29 @@ function SpendingTrendChart({ transactions, currentMonth }) {
 }
 
 /* Daily Spending Chart for CategoryDetail */
-function DailySpendingChart({ monthTx, monthKey, subCategories = [] }) {
+function DailySpendingChart({ monthTx, periodStart, periodEnd, subCategories = [] }) {
   const [hoveredDay, setHoveredDay] = useState(null);
-  const [year, month] = monthKey.split("-").map(Number);
-  const lastDay = new Date(year, month, 0).getDate();
+  const days = [];
+  for (let day = dateAtLocalMidnight(periodStart), end = dateAtLocalMidnight(periodEnd); day <= end; day.setDate(day.getDate() + 1)) {
+    days.push(dateString(day));
+  }
+  const dayCount = Math.max(days.length, 1);
 
   const colors = ["#C9A24B", "#3E8E7E", "#C4604A", "#6E8FB0", "#9B7EBD", "#7FAE8B", "#B58AC4"];
   const spendingTx = monthTx.filter((t) => t.type === "expense" || !t.type);
   const subIds = Array.from(new Set(spendingTx.map((t) => t.subId || "__category")));
   const series = subIds.map((subId, index) => {
     const subName = subId === "__category" ? "Tanpa sub-alokasi" : (subCategories.find((sub) => sub.id === subId)?.name || subId);
-    const values = Array.from({ length: lastDay }, (_, dayIndex) => {
-      const day = dayIndex + 1;
-      const dateStr = `${monthKey}-${String(day).padStart(2, "0")}`;
+    const values = days.map((dateStr) => {
       return spendingTx
         .filter((t) => (t.subId || "__category") === subId && t.date === dateStr)
         .reduce((sum, t) => sum + Number(t.amount), 0);
     });
     return { id: subId, name: subName, color: colors[index % colors.length], values };
   });
-  const dailyTotals = Array.from({ length: lastDay }, (_, index) => series.reduce((sum, item) => sum + item.values[index], 0));
+  const dailyTotals = Array.from({ length: dayCount }, (_, index) => series.reduce((sum, item) => sum + item.values[index], 0));
   const totalSpending = dailyTotals.reduce((sum, value) => sum + value, 0);
-  const avgDaily = totalSpending / lastDay;
+  const avgDaily = totalSpending / dayCount;
   const maxDaily = Math.max(...series.flatMap((item) => item.values), 1);
   const chartHeight = 120;
   const chartLeft = 52;
@@ -296,12 +349,12 @@ function DailySpendingChart({ monthTx, monthKey, subCategories = [] }) {
   const pointsFor = (item) => item.values.map((value, index) => ({
     day: index + 1,
     value,
-    x: chartLeft + (index / Math.max(lastDay - 1, 1)) * chartWidth,
+    x: chartLeft + (index / Math.max(dayCount - 1, 1)) * chartWidth,
     y: chartHeight - (value / maxDaily) * chartHeight,
   }));
-  const hoveredDate = hoveredDay ? `${monthKey}-${String(hoveredDay).padStart(2, "0")}` : "";
+  const hoveredDate = hoveredDay ? days[hoveredDay - 1] : "";
   const hoveredValues = series.map((item) => ({ ...item, value: item.values[(hoveredDay || 1) - 1] || 0 }));
-  const labelStep = lastDay <= 10 ? 1 : 5;
+  const labelStep = dayCount <= 10 ? 1 : Math.ceil(dayCount / 7);
 
   return (
     <div className="flex flex-col gap-3">
@@ -314,7 +367,7 @@ function DailySpendingChart({ monthTx, monthKey, subCategories = [] }) {
             <p className="muted">Rata-rata harian</p>
             <p className="font-bold tabular">{rupiah(avgDaily)}</p>
           </div>
-          <div><p className="muted">Total bulan</p><p className="font-bold tabular" style={{ color: "var(--rose)" }}>{rupiah(totalSpending)}</p></div>
+          <div><p className="muted">Total periode</p><p className="font-bold tabular" style={{ color: "var(--rose)" }}>{rupiah(totalSpending)}</p></div>
         </div>
       </div>
 
@@ -342,7 +395,7 @@ function DailySpendingChart({ monthTx, monthKey, subCategories = [] }) {
         {hoveredDay && (
           <g pointerEvents="none">
             <rect
-              x={hoveredDay > lastDay * 0.7 ? 250 : 62}
+              x={hoveredDay > dayCount * 0.7 ? 250 : 62}
               y="6"
               width="170"
               height={Math.min(100, 28 + hoveredValues.length * 14)}
@@ -352,7 +405,7 @@ function DailySpendingChart({ monthTx, monthKey, subCategories = [] }) {
               strokeWidth="1"
             />
             <text
-              x={hoveredDay > lastDay * 0.7 ? 260 : 72}
+              x={hoveredDay > dayCount * 0.7 ? 260 : 72}
               y="20"
               fontSize="10"
               fill="var(--muted)"
@@ -362,7 +415,7 @@ function DailySpendingChart({ monthTx, monthKey, subCategories = [] }) {
             {hoveredValues.filter((item) => item.value > 0).slice(0, 5).map((item, index) => (
               <text
                 key={`${item.id}-detail`}
-                x={hoveredDay > lastDay * 0.7 ? 260 : 72}
+                x={hoveredDay > dayCount * 0.7 ? 260 : 72}
                 y={34 + index * 14}
                 fontSize="9"
                 fill={item.color}
@@ -374,18 +427,18 @@ function DailySpendingChart({ monthTx, monthKey, subCategories = [] }) {
         )}
 
         {/* X-axis labels */}
-        {Array.from({ length: lastDay }, (_, index) => index + 1).filter((day) => day % labelStep === 0 || day === 1 || day === lastDay).map((day) => {
+        {Array.from({ length: dayCount }, (_, index) => index + 1).filter((day) => day % labelStep === 0 || day === 1 || day === dayCount).map((day) => {
           return (
             <text
               key={`label-${day}`}
-              x={chartLeft + (day - 1) / Math.max(lastDay - 1, 1) * chartWidth}
+              x={chartLeft + (day - 1) / Math.max(dayCount - 1, 1) * chartWidth}
               y={chartHeight + 20}
               textAnchor="middle"
               fontSize="11"
               fill="var(--muted)"
               className="muted"
             >
-              {day}
+              {Number(days[day - 1]?.slice(-2) || day)}
             </text>
           );
         })}
@@ -413,7 +466,7 @@ function DailySpendingChart({ monthTx, monthKey, subCategories = [] }) {
       <div className="flex items-center justify-between text-xs muted">
         <span>Hari ke-1</span>
         <span>Setiap titik = total pengeluaran hari itu</span>
-        <span>Hari ke-{lastDay}</span>
+        <span>{dayCount} hari</span>
       </div>
     </div>
   );
@@ -635,7 +688,7 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 onKeyDown={onEnter(submit)}
-                placeholder="cth. naufal@email.com"
+                placeholder="cth. user123@gmail.com"
               />
               {email.trim().length > 0 && !emailValid && (
                 <span className="text-xs" style={{ color: "var(--rose)" }}>Format email belum valid.</span>
@@ -1081,8 +1134,9 @@ function ResumeScreen({ categories, income, onEdit, onConfirm }) {
 }
 
 /* ---------- Allocation editor (post-setup, opened from dashboard) ---------- */
-function AllocationEditor({ user, onSave, onCancel }) {
-  const [categories, setCategories] = useState(user.categories.map((c) => ({ ...c, subs: c.subs.map((s) => ({ ...s })) })));
+function AllocationEditor({ user, onSave, onCancel, initialCategories, incomeOverride, embedded = false }) {
+  const sourceCategories = initialCategories || user.categories;
+  const [categories, setCategories] = useState(sourceCategories.map((c) => ({ ...c, subs: (c.subs || []).map((s) => ({ ...s })) })));
   const [expandedId, setExpandedId] = useState(null);
   const [newCatName, setNewCatName] = useState("");
   const [newCatPercent, setNewCatPercent] = useState("");
@@ -1092,7 +1146,7 @@ function AllocationEditor({ user, onSave, onCancel }) {
   const [newSubMode, setNewSubMode] = useState("percent");
   const [error, setError] = useState("");
 
-  const income = user.income;
+  const income = Number(incomeOverride ?? getActivePeriod(user).amount ?? 0);
   const total = categories.reduce((s, c) => s + Number(c.percent || 0), 0);
 
   const updateCatName = (id, name) => setCategories(categories.map((c) => c.id === id ? { ...c, name } : c));
@@ -1134,11 +1188,12 @@ function AllocationEditor({ user, onSave, onCancel }) {
   };
 
   return (
-    <div className="min-h-screen">
-      <TopBar name={user.name} onLogout={onCancel} right={
+    <div className={embedded ? "modal-overlay anim-fade" : "min-h-screen"} onClick={embedded ? onCancel : undefined}>
+      <div className={embedded ? "card p-4 anim-pop" : ""} style={embedded ? { maxWidth: 760, maxHeight: "92vh", width: "100%", overflowY: "auto" } : undefined} onClick={embedded ? (event) => event.stopPropagation() : undefined}>
+      {!embedded && <TopBar name={user.name} onLogout={onCancel} right={
         <button className="btn-ghost text-sm flex items-center gap-2" onClick={onCancel}><ArrowLeft size={14} /> Batal</button>
-      } />
-      <div className="p-4 md:p-8 max-w-3xl mx-auto flex flex-col gap-6 anim-fade-up">
+      } />}
+      <div className={`p-4 md:p-8 max-w-3xl mx-auto flex flex-col gap-6 anim-fade-up${embedded ? "" : ""}`}>
         <div>
           <h1 className="display" style={{ fontSize: 22, fontWeight: 700 }}>Edit alokasi & sub-alokasi</h1>
           <p className="muted text-sm mt-1">
@@ -1253,11 +1308,12 @@ function AllocationEditor({ user, onSave, onCancel }) {
         )}
 
         <div className="flex gap-2">
-          <button className="btn-ghost flex items-center gap-2" onClick={onCancel}><X size={15} /> Batal</button>
+            <button className="btn-ghost flex items-center gap-2" onClick={onCancel}><X size={15} /> {embedded ? "Kembali" : "Batal"}</button>
           <button className="btn-primary flex-1 flex items-center justify-center gap-2" onClick={save}>
-            Simpan Perubahan <Check size={16} />
+            {embedded ? "Gunakan Alokasi Ini" : "Simpan Perubahan"} <Check size={16} />
           </button>
         </div>
+      </div>
       </div>
     </div>
   );
@@ -1293,18 +1349,20 @@ function AppFooter() {
       >
         @naufalnurf__
       </a>
+      <span className="muted"> · v1.2.1</span>
     </footer>
   );
 }
 
-function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout, onEditAlloc, onAddMoney, onViewHistory, onOpenSettings, onOpenGoals, onOpenCalculator, onConfirmMonthIncome }) {
-  const activeMonth = getActiveMonth(user);
-  const realCurrentMonth = nowMonthKey();
-  const promptDismissed = !!getMonthlyPromptDismissals(user)[realCurrentMonth];
-  const needsNewMonthIncome = accountLoaded && realCurrentMonth !== activeMonth && !promptDismissed;
-  const income = getIncomeForMonth(user, activeMonth);
+function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout, onEditAlloc, onAddMoney, onViewHistory, onOpenSettings, onOpenGoals, onOpenCalculator }) {
+  const periods = getSalaryPeriods(user);
+  const activePeriod = getActivePeriod(user);
+  const activeMonth = monthKey(activePeriod.startDate);
+  const periodLabel = `${dateLabel(activePeriod.startDate)} - ${dateLabel(getPeriodEnd(activePeriod, periods) || todayStr())}`;
+  const needsNewMonthIncome = accountLoaded && isPaydayReminderDue(user);
+  const income = Number(activePeriod.amount || 0);
 
-  const monthTx = transactions.filter((t) => monthKey(t.date) === activeMonth);
+  const monthTx = transactionsForPeriod(transactions, activePeriod, periods);
   const expenses = monthTx.filter(isExpenseTx);
   const topups = monthTx.filter(isTopupTx);
   const globalTopup = topups.filter((t) => !t.categoryId).reduce((s, t) => s + Number(t.amount), 0);
@@ -1313,7 +1371,7 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
   const totalSpent = expenses.reduce((s, t) => s + Number(t.amount), 0);
   const cashIncome = income + totalTopup;
   const thisMonthNet = cashIncome - totalSpent;
-  const balance = cumulativeBalanceUpTo(user, transactions, activeMonth);
+  const balance = cumulativeBalanceUpTo(user, transactions, todayStr());
   const totalAssets = user.categories
     .filter((category) => category.isAsset)
     .reduce((sum, category) => sum + assetBalance(transactions, category.id), 0);
@@ -1344,31 +1402,27 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
             <div className="flex items-center gap-2">
               <AlertCircle size={16} color="var(--gold)" />
               <p className="text-sm">
-                Kamu masih melihat data <b>{monthLabelFor(activeMonth)}</b>. Belum ada income yang diinput untuk{" "}
-                <b>{monthLabelFor(realCurrentMonth)}</b> — saldo & alokasi bulan lalu tetap ditampilkan sampai kamu input manual.
+                Periode gaji terakhir dimulai <b>{dateLabel(activePeriod.startDate)}</b>. Saat gaji berikutnya diterima, catat lewat <b>Tambah Uang · Gaji Bulanan</b>.
               </p>
             </div>
-            <button className="btn-primary text-sm flex items-center gap-2" onClick={onConfirmMonthIncome}>
-              <Plus size={14} /> Input Income Bulan Ini
-            </button>
           </div>
         )}
 
         <div className="card p-6">
           <div className="flex items-center justify-between flex-wrap gap-2">
-            <p className="muted text-sm">Ringkasan {monthLabelFor(activeMonth)}</p>
+            <p className="muted text-sm">Periode {periodLabel}</p>
             <div className="dashboard-actions flex gap-2">
               <button className="btn-ghost text-sm flex items-center gap-2" onClick={onViewHistory}>Riwayat Bulanan</button>
               <button className="btn-ghost text-sm flex items-center gap-2" onClick={onOpenGoals}><Target size={14} /> Tujuan Tabungan</button>
               <button className="btn-ghost text-sm flex items-center gap-2" onClick={onOpenCalculator}><Calculator size={14} /> Kalkulator</button>
-              <button className="btn-primary text-sm flex items-center gap-2" onClick={onAddMoney}><Plus size={14} /> Tambah Uang</button>
+              <button className="btn-ghost text-sm flex items-center gap-2" onClick={onAddMoney}><Plus size={14} /> Tambah Uang</button>
             </div>
           </div>
           <div className="dashboard-summary-metrics flex flex-wrap gap-8 mt-3">
             <div>
               <p className="muted text-xs uppercase tracking-wide">Income</p>
               <p className="display tabular" style={{ fontSize: 20, fontWeight: 700 }}>{rupiah(cashIncome)}</p>
-              {totalTopup > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--teal)" }}>+{rupiah(totalTopup)} tambahan bulan ini</p>}
+              {totalTopup > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--teal)" }}>+{rupiah(totalTopup)} tambahan periode ini</p>}
             </div>
             <div>
               <p className="muted text-xs uppercase tracking-wide">Terpakai</p>
@@ -1404,7 +1458,8 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
           <p className="muted text-xs uppercase tracking-wide mb-3">Kategori alokasi</p>
           <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
             {user.categories.map((c, i) => {
-              const allocated = effectiveIncome * c.percent / 100 + directTopupFor(c.id) + subTopupFor(c.id);
+                const carryover = periodCarryoverAmount(activePeriod, c.id);
+                const allocated = effectiveIncome * c.percent / 100 + directTopupFor(c.id) + subTopupFor(c.id) + carryover;
               const spent = c.isAsset ? assetDepositFor(c.id) - withdrawFor(c.id) : spentFor(c.id);
               const pct = allocated > 0 ? (spent / allocated) * 100 : 0;
               return (
@@ -1423,6 +1478,7 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
                     <ChevronRight size={16} className="muted" />
                   </div>
                   <p className="muted text-xs mb-1">{fmtPercent(c.percent)}% dari income</p>
+                  {carryover > 0 && <p className="text-xs mb-1" style={{ color: "var(--teal)" }}>+{rupiah(carryover)} saldo periode lalu</p>}
                   {c.isAsset ? (
                     <>
                       <p className="muted text-xs">Saldo total aset</p>
@@ -1479,15 +1535,19 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
 
   if (!cat) return null;
   const isAsset = !!cat.isAsset;
-  const activeMonth = getActiveMonth(user);
-  const income = getIncomeForMonth(user, activeMonth);
-  const allMonthTx = transactions.filter((t) => monthKey(t.date) === activeMonth);
+  const periods = getSalaryPeriods(user);
+  const activePeriod = getActivePeriod(user);
+  const activeMonth = monthKey(activePeriod.startDate);
+  const periodLabel = `${dateLabel(activePeriod.startDate)} - ${dateLabel(getPeriodEnd(activePeriod, periods) || todayStr())}`;
+  const income = Number(activePeriod.amount || 0);
+  const allMonthTx = transactionsForPeriod(transactions, activePeriod, periods);
   const globalTopup = allMonthTx.filter((t) => isTopupTx(t) && !t.categoryId).reduce((s, t) => s + Number(t.amount), 0);
   const effectiveIncome = income + globalTopup;
   const directTopup = allMonthTx.filter((t) => isTopupTx(t) && t.categoryId === cat.id && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const subTopupTotal = allMonthTx.filter((t) => isTopupTx(t) && t.categoryId === cat.id && t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const baseAllocated = effectiveIncome * cat.percent / 100;
-  const allocated = baseAllocated + directTopup + subTopupTotal;
+  const categoryCarryover = periodCarryoverAmount(activePeriod, cat.id);
+  const allocated = baseAllocated + directTopup + subTopupTotal + categoryCarryover;
   const monthTx = allMonthTx.filter((t) => t.categoryId === cat.id);
   const deposited = monthTx.filter(isAssetMonthlyDepositTx).reduce((s, t) => s + Number(t.amount), 0);
   const spent = isAsset ? deposited : monthTx.filter(isExpenseTx).reduce((s, t) => s + Number(t.amount), 0);
@@ -1496,7 +1556,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const remaining = allocated - (isAsset ? netAssetMovement : spent);
   const catPct = allocated > 0 ? ((isAsset ? netAssetMovement : spent) / allocated) * 100 : 0;
   const catSaldo = assetBalance(transactions, cat.id);
-  const history = transactions.filter((t) => t.categoryId === cat.id && monthKey(t.date) === activeMonth).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const history = allMonthTx.filter((t) => t.categoryId === cat.id).sort((a, b) => (a.date < b.date ? 1 : -1));
   const filteredHistory = search.trim()
     ? history.filter((t) => {
         const subName = cat.subs.find((s) => s.id === t.subId)?.name || "";
@@ -1514,7 +1574,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
     if (targetSubId) {
       const sub = cat.subs.find((s) => s.id === targetSubId);
       if (sub) {
-        const subAlloc = baseAllocated * sub.percent / 100 + topupForSub(sub.id);
+        const subAlloc = baseAllocated * sub.percent / 100 + topupForSub(sub.id) + periodCarryoverAmount(activePeriod, cat.id, sub.id);
         const subMovement = spentForSub(sub.id) - (isAsset ? withdrawnForSub(sub.id) : 0);
         const subRemaining = subAlloc - subMovement;
         if (amt > subRemaining) return `Sisa alokasi "${sub.name}" tidak mencukupi. Sisa saat ini ${rupiah(subRemaining)}.`;
@@ -1571,7 +1631,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
           </div>
           <p className="muted text-sm mb-3">
             {fmtPercent(cat.percent)}% dari income bulanan
-            {activeMonth !== nowMonthKey() && <> · menampilkan data <b style={{ color: "var(--text)" }}>{monthLabelFor(activeMonth)}</b></>}
+            · periode {periodLabel}
           </p>
           {isAsset ? (
             <>
@@ -1581,9 +1641,10 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
                   <p className="display tabular" style={{ fontSize: 20, fontWeight: 700, color: "var(--teal)" }}>{rupiah(catSaldo)}</p>
                 </div>
                 <div>
-                  <p className="muted text-xs uppercase tracking-wide">Alokasi bulan ini</p>
+                  <p className="muted text-xs uppercase tracking-wide">Alokasi periode ini</p>
                   <p className="tabular" style={{ fontWeight: 700 }}>{rupiah(allocated)}</p>
                   {directTopup > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--teal)" }}>+{rupiah(directTopup)} tambahan</p>}
+                  {categoryCarryover > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--teal)" }}>termasuk {rupiah(categoryCarryover)} saldo periode lalu</p>}
                 </div>
               </div>
               <p className="muted text-xs mt-3">
@@ -1601,9 +1662,10 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
                   <p className="muted text-xs uppercase tracking-wide">Alokasi</p>
                   <p className="tabular" style={{ fontWeight: 700 }}>{rupiah(allocated)}</p>
                   {directTopup > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--teal)" }}>+{rupiah(directTopup)} tambahan</p>}
+                  {categoryCarryover > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--teal)" }}>termasuk {rupiah(categoryCarryover)} saldo periode lalu</p>}
                 </div>
                 <div>
-                  <p className="muted text-xs uppercase tracking-wide">Terpakai bulan ini</p>
+                  <p className="muted text-xs uppercase tracking-wide">Terpakai periode ini</p>
                   <p className="tabular" style={{ fontWeight: 700, color: "var(--rose)" }}>{rupiah(spent)}</p>
                 </div>
                 <div>
@@ -1624,7 +1686,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
             <p className="muted text-xs uppercase tracking-wide mb-3">Rincian sub-alokasi</p>
             <div className="flex flex-col gap-3">
               {cat.subs.map((s, si) => {
-                const subAlloc = baseAllocated * s.percent / 100 + topupForSub(s.id);
+                const subAlloc = baseAllocated * s.percent / 100 + topupForSub(s.id) + periodCarryoverAmount(activePeriod, cat.id, s.id);
                 const subSpent = spentForSub(s.id) - (isAsset ? withdrawnForSub(s.id) : 0);
                 const subRemaining = subAlloc - subSpent;
                 const subPct = subAlloc > 0 ? (subSpent / subAlloc) * 100 : 0;
@@ -1663,8 +1725,8 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
                 </div>
               </div>
               <p className="muted text-xs mb-3">
-                {assetMode === "setor"
-                  ? <>Sisa target setor bulan ini: <span className="tabular" style={{ color: remaining < 0 ? "var(--rose)" : "var(--teal)" }}>{rupiah(remaining)}</span></>
+                    {assetMode === "setor"
+                  ? <>Sisa target setor periode ini: <span className="tabular" style={{ color: remaining < 0 ? "var(--rose)" : "var(--teal)" }}>{rupiah(remaining)}</span></>
                   : <>Saldo tersedia untuk ditarik: <span className="tabular" style={{ color: "var(--teal)" }}>{rupiah(subId ? assetBalance(transactions, cat.id, subId) : catSaldo)}</span></>}
               </p>
             </>
@@ -1752,13 +1814,18 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
 
         {!isAsset && (
           <div className="card p-6">
-            <DailySpendingChart monthTx={monthTx} monthKey={activeMonth} subCategories={cat.subs} />
+            <DailySpendingChart
+              monthTx={monthTx}
+              periodStart={activePeriod.startDate}
+              periodEnd={getPeriodEnd(activePeriod, periods) || todayStr()}
+              subCategories={cat.subs}
+            />
           </div>
         )}
 
         <div>
           <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-            <p className="muted text-xs uppercase tracking-wide">Riwayat transaksi · {monthLabelFor(activeMonth)}</p>
+            <p className="muted text-xs uppercase tracking-wide">Riwayat transaksi · {periodLabel}</p>
             <div className="flex items-center gap-1.5" style={{ maxWidth: 220 }}>
               <Search size={14} className="muted" />
               <input style={{ fontSize: 12 }} placeholder="Cari catatan / sub / tanggal" value={search} onChange={(e) => setSearch(e.target.value)} />
@@ -1813,16 +1880,38 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
 
 /* ---------- App ---------- */
 /* ---------- Add money modal ---------- */
-function AddMoneyModal({ user, onClose, onSubmit }) {
-  const [target, setTarget] = useState("global"); // global | category | sub | asset | asset_opening
+function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, initialTarget = "global" }) {
+  const [target, setTarget] = useState(initialTarget); // global | category | sub | asset | asset_opening | salary
   const [categoryId, setCategoryId] = useState(user.categories[0]?.id || "");
   const [subId, setSubId] = useState("");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const [date, setDate] = useState(todayStr());
+  const activePeriod = getActivePeriod(user);
+  const [salaryAmount, setSalaryAmount] = useState(String(activePeriod.amount || user.income || ""));
+  const [salaryDate, setSalaryDate] = useState(todayStr());
+  const [salaryAllocationMode, setSalaryAllocationMode] = useState("previous");
+  const [customSalaryCategories, setCustomSalaryCategories] = useState(null);
+  const [carryoverEnabled, setCarryoverEnabled] = useState(true);
+  const [carryoverCategoryId, setCarryoverCategoryId] = useState(user.categories[0]?.id || "");
+  const [carryoverSubId, setCarryoverSubId] = useState("");
+  const [editingSalaryAllocation, setEditingSalaryAllocation] = useState(false);
+  const [salaryError, setSalaryError] = useState("");
+  const [salaryBusy, setSalaryBusy] = useState(false);
 
   const assetCategories = user.categories.filter((c) => c.isAsset);
   const cat = user.categories.find((c) => c.id === categoryId);
+  const previousCategories = activePeriod.categories || user.categories;
+  const salaryCategories = salaryAllocationMode === "custom" && customSalaryCategories
+    ? customSalaryCategories
+    : previousCategories;
+  const previousSalaryPeriod = getSalaryPeriods(user)
+    .filter((period) => period.startDate < salaryDate)
+    .at(-1);
+  const availableCarryover = previousSalaryPeriod
+    ? getPeriodCashRemainder(user, transactions, previousSalaryPeriod, salaryDate)
+    : 0;
+  const carryoverCategory = salaryCategories.find((category) => category.id === carryoverCategoryId) || salaryCategories[0];
 
   const chooseCategory = (id) => { setCategoryId(id); setSubId(""); };
   const chooseTarget = (nextTarget) => {
@@ -1832,12 +1921,34 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
       setCategoryId(assetCategories[0]?.id || "");
     } else if (nextTarget === "global") {
       setCategoryId(user.categories[0]?.id || "");
+    } else if (nextTarget === "salary") {
+      setSalaryError("");
     } else if (!user.categories.some((category) => category.id === categoryId)) {
       setCategoryId(user.categories[0]?.id || "");
     }
   };
 
-  const submit = () => {
+  const submit = async () => {
+    if (target === "salary") {
+      const salary = Number(salaryAmount);
+      if (!(salary > 0)) { setSalaryError("Nominal gaji harus lebih dari 0."); return; }
+      if (!salaryDate || salaryDate > todayStr()) { setSalaryError("Tanggal gaji tidak boleh di masa depan."); return; }
+      setSalaryBusy(true);
+      setSalaryError("");
+      try {
+        const carryover = carryoverEnabled && availableCarryover > 0 && carryoverCategory
+          ? { categoryId: carryoverCategory.id, subId: carryoverSubId || null, amount: availableCarryover }
+          : null;
+        const saved = await onSalarySubmit(salary, salaryDate, salaryCategories, carryover);
+        if (typeof saved === "string") setSalaryError(`Gagal menyimpan gaji: ${saved}`);
+        else if (!saved) setSalaryError("Gaji belum berhasil disimpan. Coba lagi.");
+      } catch (error) {
+        setSalaryError(`Gagal menyimpan gaji: ${error.message || "Terjadi kesalahan."}`);
+      } finally {
+        setSalaryBusy(false);
+      }
+      return;
+    }
     const amt = Number(amount);
     if (!(amt > 0)) return;
     if ((target === "sub" || target === "asset" || target === "asset_opening") && !categoryId) return;
@@ -1858,19 +1969,23 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
 
   return (
     <div className="modal-overlay anim-fade" onClick={onClose}>
-      <div className="card p-6 anim-pop" style={{ maxWidth: 440, width: "100%" }} onClick={(e) => e.stopPropagation()}>
+      <div
+        className={`card p-6 anim-pop add-money-modal${target === "salary" ? " add-money-modal-salary" : ""}`}
+        style={{ maxWidth: 440, width: "100%", ...(target === "salary" ? { maxHeight: "min(88dvh, 760px)" } : {}) }}
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between mb-1">
           <h2 className="display" style={{ fontSize: 18, fontWeight: 700 }}>Tambah Uang</h2>
           <button className="icon-btn" onClick={onClose}><X size={18} /></button>
         </div>
         <p className="muted text-sm mb-4">
-          Tambahkan dana bulan ini ke seluruh alokasi, kategori tertentu, sub-alokasi,
-          atau langsung mencatatnya sebagai saldo aset.
+          Catat gaji baru atau tambahkan dana ke alokasi dan aset.
         </p>
 
-        <div className="flex flex-col gap-4">
+        <div className={`flex flex-col gap-4 add-money-modal-content${target === "salary" ? " add-money-modal-content-salary" : ""}`}>
           <Field label="Tujuan dana">
-            <div className="flex gap-2 flex-wrap">
+            <div className={`flex gap-2 flex-wrap${target === "salary" ? " salary-target-list" : ""}`}>
+              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "salary")} onClick={() => chooseTarget("salary")}>Gaji Bulanan</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "global")} onClick={() => setTarget("global")}>Seluruh Alokasi</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "category")} onClick={() => setTarget("category")}>Kategori Tertentu</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "sub")} onClick={() => setTarget("sub")}>Sub-alokasi Tertentu</button>
@@ -1878,6 +1993,67 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
             </div>
           </Field>
 
+          {target === "salary" && (
+            <>
+              <Field label="Nominal gaji yang diterima">
+                <input type="number" value={salaryAmount} onChange={(event) => { setSalaryAmount(event.target.value); setSalaryError(""); }} placeholder="cth. 8000000" />
+              </Field>
+              <Field label="Tanggal gaji diterima">
+                <input type="date" value={salaryDate} max={todayStr()} onChange={(event) => { setSalaryDate(event.target.value); setSalaryError(""); }} />
+              </Field>
+              <Field label="Alokasi periode baru">
+                <div className="flex gap-2 flex-wrap">
+                  <button type="button" className="btn-ghost text-sm" style={tabStyle(salaryAllocationMode === "previous")} onClick={() => { setSalaryAllocationMode("previous"); setCarryoverCategoryId(previousCategories[0]?.id || ""); setCarryoverSubId(""); }}>Pakai Persentase Sebelumnya</button>
+                  <button type="button" className="btn-ghost text-sm" style={tabStyle(salaryAllocationMode === "custom")} onClick={() => { setSalaryAllocationMode("custom"); setCarryoverCategoryId(salaryCategories[0]?.id || ""); setCarryoverSubId(""); }}>Atur Custom</button>
+                </div>
+              </Field>
+              <p className="muted text-xs">Gaji ini memulai periode baru. Transaksi periode lama tetap tersimpan.</p>
+              {availableCarryover > 0 && (
+                <div className="card2 p-3 flex flex-col gap-3">
+                  <label className="flex items-center gap-2 text-sm" style={{ cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={carryoverEnabled}
+                      onChange={(event) => setCarryoverEnabled(event.target.checked)}
+                      style={{ width: "auto" }}
+                    />
+                    Alokasikan sisa periode sebelumnya ({rupiah(availableCarryover)})
+                  </label>
+                  {carryoverEnabled && carryoverCategory && (
+                    <>
+                      <Field label="Tambahkan sisa ke kategori">
+                        <select
+                          value={carryoverCategory.id}
+                          onChange={(event) => { setCarryoverCategoryId(event.target.value); setCarryoverSubId(""); }}
+                        >
+                          {salaryCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+                        </select>
+                      </Field>
+                      {carryoverCategory.subs.length > 0 && (
+                        <Field label="Sub-alokasi tujuan">
+                          <select value={carryoverSubId} onChange={(event) => setCarryoverSubId(event.target.value)}>
+                            <option value="">Tambahkan ke alokasi kategori</option>
+                            {carryoverCategory.subs.map((sub) => <option key={sub.id} value={sub.id}>{sub.name}</option>)}
+                          </select>
+                        </Field>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+              {salaryAllocationMode === "custom" && (
+                <button type="button" className="btn-ghost flex items-center justify-center gap-2" onClick={() => setEditingSalaryAllocation(true)}>
+                  <Pencil size={14} /> Sesuaikan alokasi & sub-alokasi
+                </button>
+              )}
+              {salaryError && <div className="flex items-center gap-2 text-sm" style={{ color: "var(--rose)" }}><AlertCircle size={14} /> {salaryError}</div>}
+              <button className="btn-primary flex items-center justify-center gap-2 mt-1 salary-submit" onClick={submit} disabled={!(Number(salaryAmount) > 0) || salaryBusy}>
+                <Check size={16} /> {salaryBusy ? "Menyimpan..." : "Mulai Periode Baru"}
+              </button>
+            </>
+          )}
+
+          {target !== "salary" && <>
           {(target === "category" || target === "sub" || target === "asset" || target === "asset_opening") && (
             <Field label="Kategori">
               <select value={categoryId} onChange={(e) => chooseCategory(e.target.value)}>
@@ -1920,29 +2096,41 @@ function AddMoneyModal({ user, onClose, onSubmit }) {
           >
             <Plus size={16} /> Tambahkan Dana
           </button>
+          </>}
         </div>
       </div>
+      {editingSalaryAllocation && (
+        <AllocationEditor
+          user={{ ...user, categories: salaryCategories }}
+          initialCategories={salaryCategories}
+          incomeOverride={Number(salaryAmount) || 0}
+          embedded
+          onCancel={() => setEditingSalaryAllocation(false)}
+          onSave={(categories) => {
+            setCustomSalaryCategories(categories);
+            setCarryoverCategoryId(categories[0]?.id || "");
+            setCarryoverSubId("");
+            setEditingSalaryAllocation(false);
+          }}
+        />
+      )}
     </div>
   );
 }
 
 /* ---------- Monthly history ---------- */
 function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) {
-  const activeMonth = getActiveMonth(user);
-  const allMonths = Array.from(new Set([
-    nowMonthKey(),
-    ...Object.keys(user.monthlyIncomes || {}),
-    ...transactions.map((t) => monthKey(t.date)),
-  ]))
-    .filter(Boolean)
-    .sort()
-    .reverse();
-  const [selected, setSelected] = useState(activeMonth);
+  const periods = getSalaryPeriods(user);
+  const activePeriod = getActivePeriod(user);
+  const historyPeriods = periods.length ? periods : [activePeriod];
+  const [selectedId, setSelectedId] = useState(activePeriod.id);
+  const selectedPeriod = historyPeriods.find((period) => period.id === selectedId) || activePeriod;
+  const historyCategories = selectedPeriod.categories || user.categories;
   const [expandedCat, setExpandedCat] = useState(null);
   const [search, setSearch] = useState("");
   const [editingTx, setEditingTx] = useState(null);
 
-  const monthT = transactions.filter((t) => monthKey(t.date) === selected);
+  const monthT = transactionsForPeriod(transactions, selectedPeriod, periods);
   const expenses = monthT.filter(isExpenseTx);
   const topups = monthT.filter(isTopupTx);
   const assetTopups = monthT.filter((t) => isAssetTopupTx(t) && !isAssetOpeningTx(t));
@@ -1951,13 +2139,14 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
   const totalTopup = topups.reduce((s, t) => s + Number(t.amount), 0);
   const totalAssetTopup = assetTopups.reduce((s, t) => s + Number(t.amount), 0);
   const totalAssetOpening = assetOpenings.reduce((s, t) => s + Number(t.amount), 0);
-  const selectedIncome = getIncomeForMonth(user, selected);
-  const hasIncomeRecord = Object.prototype.hasOwnProperty.call(user.monthlyIncomes || {}, selected);
+  const selectedIncome = Number(selectedPeriod.amount || 0);
+  const hasIncomeRecord = historyPeriods.some((period) => period.id === selectedPeriod.id);
   const effectiveIncome = selectedIncome + globalTopup;
   const totalSpent = expenses.reduce((s, t) => s + Number(t.amount), 0);
   const cashIncome = selectedIncome + totalTopup;
   const thisMonthNet = cashIncome - totalSpent;
-  const balance = cumulativeBalanceUpTo(user, transactions, selected);
+  const selectedEnd = getPeriodEnd(selectedPeriod, periods) || todayStr();
+  const balance = cumulativeBalanceUpTo(user, transactions, selectedEnd);
   const prevCarry = balance - thisMonthNet;
 
   const directTopupForCat = (catId) => topups.filter((t) => t.categoryId === catId && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
@@ -1969,17 +2158,18 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
   const monthTxSorted = [...monthT].sort((a, b) => (a.date < b.date ? 1 : -1));
   const filteredTx = search.trim()
     ? monthTxSorted.filter((t) => {
-        const cat = user.categories.find((c) => c.id === t.categoryId);
+        const cat = historyCategories.find((c) => c.id === t.categoryId) || user.categories.find((c) => c.id === t.categoryId);
         const sub = cat?.subs.find((s) => s.id === t.subId);
         const q = search.trim().toLowerCase();
         return (t.note || "").toLowerCase().includes(q) || (cat?.name || "").toLowerCase().includes(q) || (sub?.name || "").toLowerCase().includes(q) || t.date.includes(q);
       })
     : monthTxSorted;
 
-  const trendMonths = allMonths.slice(0, 6).slice().reverse();
-  const trendData = trendMonths.map((mKey) => ({
-    mKey,
-    spent: transactions.filter((t) => monthKey(t.date) === mKey && isExpenseTx(t)).reduce((s, t) => s + Number(t.amount), 0),
+  const trendPeriods = historyPeriods.slice(-6);
+  const trendData = trendPeriods.map((period) => ({
+    id: period.id,
+    period,
+    spent: transactionsForPeriod(transactions, period, periods).filter(isExpenseTx).reduce((s, t) => s + Number(t.amount), 0),
   }));
   const trendMax = Math.max(1, ...trendData.map((d) => d.spent));
 
@@ -1992,19 +2182,19 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
       />
       <div className="p-4 md:p-8 max-w-3xl mx-auto flex flex-col gap-6 anim-fade-up">
         <div>
-          <h1 className="display" style={{ fontSize: 22, fontWeight: 700 }}>Riwayat Bulanan</h1>
-          <p className="muted text-sm mt-1">Pengeluaran & tambahan dana per bulan, dirinci per alokasi.</p>
+            <h1 className="display" style={{ fontSize: 22, fontWeight: 700 }}>Riwayat Periode</h1>
+            <p className="muted text-sm mt-1">Pengeluaran, tambahan dana, dan alokasi per periode gaji.</p>
         </div>
 
         {trendData.length > 1 && (
           <div className="card p-6">
             <div className="flex items-center gap-2 mb-4">
               <TrendingUp size={14} className="muted" />
-              <p className="muted text-xs uppercase tracking-wide">Tren Pengeluaran ({trendData.length} Bulan Terakhir)</p>
+              <p className="muted text-xs uppercase tracking-wide">Tren Pengeluaran ({trendData.length} Periode Terakhir)</p>
             </div>
             <div className="flex items-end gap-3" style={{ height: 120 }}>
               {trendData.map((d) => (
-                <div key={d.mKey} className="flex-1 flex flex-col items-center justify-end gap-1" style={{ height: "100%" }}>
+                <div key={d.id} className="flex-1 flex flex-col items-center justify-end gap-1" style={{ height: "100%" }}>
                   <span className="tabular" style={{ fontSize: 10, color: "var(--muted)" }}>{Math.round(d.spent / 1000)}k</span>
                   <div
                     style={{
@@ -2012,14 +2202,16 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
                       maxWidth: 36,
                       height: `${Math.max(4, (d.spent / trendMax) * 90)}px`,
                       borderRadius: "4px 4px 0 0",
-                      background: d.mKey === selected ? "var(--gold)" : "var(--surface2)",
+                      background: d.id === selectedPeriod.id ? "var(--gold)" : "var(--surface2)",
                       border: "1px solid var(--border)",
                       cursor: "pointer",
                       transition: "height .3s ease",
                     }}
-                    onClick={() => { setSelected(d.mKey); setExpandedCat(null); }}
+                    onClick={() => { setSelectedId(d.id); setExpandedCat(null); }}
                   />
-                  <span className="muted" style={{ fontSize: 10 }}>{monthLabelFor(d.mKey).split(" ")[0].slice(0, 3)}</span>
+                  <span className="muted" style={{ fontSize: 10 }}>
+                    {dateAtLocalMidnight(d.period.startDate).toLocaleDateString("id-ID", { day: "numeric", month: "short" })}
+                  </span>
                 </div>
               ))}
             </div>
@@ -2027,17 +2219,19 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
         )}
 
         <div className="flex gap-2 flex-wrap">
-          {allMonths.map((mKey) => (
+          {historyPeriods.slice().reverse().map((period) => (
             <button
-              key={mKey}
+              key={period.id}
               className="btn-ghost text-sm"
-              style={mKey === selected ? { borderColor: "var(--gold)", color: "var(--gold)" } : {}}
-              onClick={() => { setSelected(mKey); setExpandedCat(null); }}
+              style={period.id === selectedPeriod.id ? { borderColor: "var(--gold)", color: "var(--gold)" } : {}}
+              onClick={() => { setSelectedId(period.id); setExpandedCat(null); }}
             >
-              {monthLabelFor(mKey)}
+              {dateLabel(period.startDate)}
             </button>
           ))}
         </div>
+
+        <p className="muted text-xs">Periode {dateLabel(selectedPeriod.startDate)} - {dateLabel(selectedEnd)}</p>
 
         <div className="card p-6">
             <div className="summary-metrics flex flex-wrap gap-8">
@@ -2064,11 +2258,12 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
         <div className="card p-6">
           <p className="muted text-xs uppercase tracking-wide mb-3">Rincian per alokasi</p>
           <div className="flex flex-col gap-2">
-            {user.categories.map((c, i) => {
+            {historyCategories.map((c, i) => {
               const directTopup = directTopupForCat(c.id);
               const subTopupTotal = topups.filter((t) => t.categoryId === c.id && t.subId).reduce((s, t) => s + Number(t.amount), 0);
               const baseAllocated = effectiveIncome * c.percent / 100;
-              const allocated = baseAllocated + directTopup + subTopupTotal;
+              const categoryCarryover = periodCarryoverAmount(selectedPeriod, c.id);
+              const allocated = baseAllocated + directTopup + subTopupTotal + categoryCarryover;
               const spent = c.isAsset
                 ? assetDepositForCat(c.id) - monthT.filter((t) => t.categoryId === c.id && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0)
                 : spentForCat(c.id);
@@ -2095,7 +2290,8 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
                   {expanded && c.subs.length > 0 && (
                     <div className="mt-3 pl-4 flex flex-col gap-2" style={{ borderLeft: "2px solid var(--border)" }}>
                       {c.subs.map((s) => {
-                        const subAlloc = baseAllocated * s.percent / 100 + topupForSub(c.id, s.id);
+                        const subAlloc = baseAllocated * s.percent / 100 + topupForSub(c.id, s.id) + periodCarryoverAmount(selectedPeriod, c.id, s.id);
+                        const subCarryover = periodCarryoverAmount(selectedPeriod, c.id, s.id);
                         const subSpent = spentForSub(c.id, s.id) - (c.isAsset
                           ? monthT.filter((t) => t.categoryId === c.id && t.subId === s.id && isWithdrawTx(t)).reduce((sum, t) => sum + Number(t.amount), 0)
                           : 0);
@@ -2106,6 +2302,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
                               <span>{s.name}</span>
                               <span className="sub-allocation-amount tabular">{rupiah(subSpent)} / {rupiah(subAlloc)}</span>
                             </div>
+                            {subCarryover > 0 && <p className="muted text-xs mb-1">Termasuk {rupiah(subCarryover)} saldo periode lalu</p>}
                             <div className="flex justify-between muted mb-1 text-xs">
                               <span></span>
                               <span className="sub-allocation-amount tabular" style={{ color: subRemaining < 0 ? "var(--rose)" : "var(--teal)" }}>Sisa: {rupiah(subRemaining)}</span>
@@ -2134,7 +2331,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
           <div className="flex flex-col gap-2">
             {filteredTx.length === 0 && <p className="muted text-sm">Tidak ada transaksi yang cocok.</p>}
             {filteredTx.map((t) => {
-              const cat = user.categories.find((c) => c.id === t.categoryId);
+              const cat = historyCategories.find((c) => c.id === t.categoryId) || user.categories.find((c) => c.id === t.categoryId);
               const sub = cat?.subs.find((s) => s.id === t.subId);
               const topup = isTopupTx(t);
               const assetTopup = isAssetTopupTx(t);
@@ -2166,7 +2363,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
       {editingTx && (
         <EditTransactionModal
           tx={editingTx}
-          cat={user.categories.find((c) => c.id === editingTx.categoryId) || null}
+          cat={historyCategories.find((c) => c.id === editingTx.categoryId) || user.categories.find((c) => c.id === editingTx.categoryId) || null}
           onClose={() => setEditingTx(null)}
           onSave={(updated) => { onUpdateTx(updated); setEditingTx(null); }}
         />
@@ -2427,10 +2624,10 @@ function DeleteAccountModal({ user, onClose, onConfirm }) {
 
 /* ---------- Settings page ---------- */
 function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfile, onImport, onMigrateLocal, onBack, onOpenReset, onOpenDelete, onLogout }) {
-  const activeMonth = getActiveMonth(user);
   const [name, setName] = useState(user.name || "");
   const [age, setAge] = useState(user.age || "");
   const [income, setIncome] = useState(user.income || "");
+  const [payDay, setPayDay] = useState(String(user.payDay || 1));
   const [profileSaved, setProfileSaved] = useState(false);
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
@@ -2438,12 +2635,11 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
   const [migrationError, setMigrationError] = useState("");
   const [migrationOk, setMigrationOk] = useState(false);
 
-  const profileValid = name.trim() && Number(age) > 0 && Number(income) > 0;
+  const profileValid = name.trim() && Number(age) > 0 && Number(income) > 0 && Number(payDay) >= 1 && Number(payDay) <= 31;
   const saveProfile = () => {
     if (!profileValid) return;
     onUpdateProfile({
-      name: name.trim(), age: Number(age), income: Number(income),
-      monthlyIncomes: { ...(user.monthlyIncomes || {}), [activeMonth]: Number(income) },
+      name: name.trim(), age: Number(age), income: Number(income), payDay: Number(payDay),
     });
     setProfileSaved(true);
     setTimeout(() => setProfileSaved(false), 2000);
@@ -2456,6 +2652,7 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
       user: {
         name: user.name, age: user.age, income: user.income,
         monthlyIncomes: user.monthlyIncomes || {},
+        salaryPeriods: user.salaryPeriods || [], payDay: user.payDay || 1,
         strategyMode: user.strategyMode, categories: user.categories,
         recurring: user.recurring || [], goals: user.goals || [],
       },
@@ -2480,6 +2677,8 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
           monthlyIncomes: (u.monthlyIncomes && typeof u.monthlyIncomes === "object")
             ? u.monthlyIncomes
             : (u.income ? { [nowMonthKey()]: u.income } : {}),
+          salaryPeriods: Array.isArray(u.salaryPeriods) ? u.salaryPeriods : [],
+          payDay: Math.max(1, Math.min(31, Number(u.payDay) || 1)),
           strategyMode: u.strategyMode || "custom", categories: u.categories,
           recurring: Array.isArray(u.recurring) ? u.recurring : [],
           goals: Array.isArray(u.goals) ? u.goals : [],
@@ -2503,6 +2702,8 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
       onMigrateLocal({
         name: localUser.name || "", age: localUser.age || null, income: localUser.income || null,
         monthlyIncomes: localUser.monthlyIncomes || {},
+        salaryPeriods: Array.isArray(localUser.salaryPeriods) ? localUser.salaryPeriods : [],
+        payDay: Math.max(1, Math.min(31, Number(localUser.payDay) || 1)),
         strategyMode: localUser.strategyMode || null, categories: localUser.categories || [],
         recurring: localUser.recurring || [], goals: localUser.goals || [],
         confirmed: !!localUser.confirmed, stage: localUser.stage || "dashboard",
@@ -2526,12 +2727,12 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
           <div className="flex flex-col gap-3">
             <Field label="Nama"><input value={name} onChange={(e) => setName(e.target.value)} /></Field>
             <Field label="Umur"><input type="number" value={age} onChange={(e) => setAge(e.target.value)} /></Field>
-            <Field label={`Income bulan ${monthLabelFor(activeMonth)}`}><input type="number" value={income} onChange={(e) => setIncome(e.target.value)} /></Field>
-            <p className="muted text-xs">
-              Ini mengoreksi income bulan yang sedang aktif ({monthLabelFor(activeMonth)}), bukan menetapkan income permanen ke depannya.
-              Setiap bulan baru tetap perlu diinput manual lewat notifikasi di dashboard.
-            </p>
-            <p className="muted text-xs">Mengubah income tidak menghapus alokasi/riwayat — nominal tiap kategori otomatis mengikuti persentase yang sudah diatur.</p>
+            <Field label="Income acuan (untuk kalkulator)"><input type="number" value={income} onChange={(e) => setIncome(e.target.value)} /></Field>
+            <Field label="Tanggal pengingat gajian">
+              <input type="number" min="1" max="31" value={payDay} onChange={(e) => setPayDay(e.target.value)} />
+            </Field>
+            <p className="muted text-xs">Pengingat muncul mulai tanggal ini. Periode anggaran hanya dimulai saat kamu mencatat gaji lewat tombol Input Gaji; tanggal dan nominalnya bisa berbeda setiap periode.</p>
+            <p className="muted text-xs">Mengubah income acuan tidak mengubah periode aktif. Input gaji aktual dan alokasinya dilakukan lewat Tambah Uang.</p>
             <button className="btn-primary flex items-center justify-center gap-2" onClick={saveProfile} disabled={!profileValid}>
               <Check size={16} /> {profileSaved ? "Tersimpan!" : "Simpan Profil"}
             </button>
@@ -3030,48 +3231,6 @@ function CalculatorPage({ user, transactions, onBack, onLogout }) {
   );
 }
 
-/* ---------- New month income confirmation modal ---------- */
-function NewMonthIncomeModal({ user, onClose, onConfirm }) {
-  const activeMonth = getActiveMonth(user);
-  const realMonth = nowMonthKey();
-  const lastIncome = getIncomeForMonth(user, activeMonth);
-  const [income, setIncome] = useState(String(lastIncome || ""));
-
-  const submit = () => {
-    const amt = Number(income);
-    if (!(amt > 0)) return;
-    onConfirm(amt);
-  };
-
-  return (
-    <div className="modal-overlay anim-fade" onClick={onClose}>
-      <div className="card p-6 anim-pop" style={{ maxWidth: 420, width: "100%" }} onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-1">
-          <h2 className="display" style={{ fontSize: 18, fontWeight: 700 }}>Input Income {monthLabelFor(realMonth)}</h2>
-          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
-        </div>
-        <p className="muted text-sm mb-4">
-          Data yang sedang ditampilkan masih dari <b style={{ color: "var(--text)" }}>{monthLabelFor(activeMonth)}</b>.
-          Masukkan income untuk bulan ini supaya alokasi & pelacakan pengeluaran mulai dihitung dari awal untuk bulan baru.
-          Riwayat bulan lalu tetap tersimpan dan bisa dilihat lagi lewat Riwayat Bulanan.
-        </p>
-        <div className="flex flex-col gap-4">
-          <Field label={`Income bulan ${monthLabelFor(realMonth)}`}>
-            <input type="number" value={income} onChange={(e) => setIncome(e.target.value)} placeholder="cth. 8000000" />
-          </Field>
-          <p className="muted text-xs">Terisi otomatis dengan income bulan lalu ({rupiah(lastIncome)}) sebagai contoh saja — ubah kalau berbeda.</p>
-          <div className="flex gap-2">
-            <button className="btn-ghost flex-1" onClick={onClose}>Nanti Saja</button>
-            <button className="btn-primary flex-1 flex items-center justify-center gap-2" onClick={submit} disabled={!(Number(income) > 0)}>
-              <Check size={16} /> Mulai Bulan Ini
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default function App() {
   const [user, setUser] = useState(null);
   const [transactions, setTransactions] = useState([]);
@@ -3084,7 +3243,6 @@ export default function App() {
   const [showForgotPassword, setShowForgotPassword] = useState(false);
   const [showResetAccount, setShowResetAccount] = useState(false);
   const [showDeleteAccount, setShowDeleteAccount] = useState(false);
-  const [showNewMonthIncome, setShowNewMonthIncome] = useState(false);
   const [theme, setTheme] = useState("dark");
   const [sessionChecked, setSessionChecked] = useState(false);
   const [accountLoaded, setAccountLoaded] = useState(false);
@@ -3136,10 +3294,19 @@ export default function App() {
     if (profileError) throw profileError;
     if (txError) throw txError;
     if (!profile || profile.id !== userId) throw new Error("Profil akun tidak ditemukan.");
+    const storedMonthlyIncomes = profile.monthly_incomes || {};
+    const hasSavedSalaryPeriods = Object.prototype.hasOwnProperty.call(storedMonthlyIncomes, "__pundi_salary_periods");
+    const hasSavedPayDay = Object.prototype.hasOwnProperty.call(storedMonthlyIncomes, "__pundi_pay_day");
     setUser({
       ...profile,
-      monthlyIncomes: profile.monthly_incomes || {},
+      monthlyIncomes: Object.fromEntries(Object.entries(storedMonthlyIncomes).filter(([key]) => /^\d{4}-\d{2}$/.test(key))),
       monthlyIncomePromptDismissed: profile.monthly_income_prompt_dismissed || {},
+      salaryPeriods: hasSavedSalaryPeriods
+        ? (Array.isArray(storedMonthlyIncomes.__pundi_salary_periods) ? storedMonthlyIncomes.__pundi_salary_periods : [])
+        : (Array.isArray(profile.salary_periods) ? profile.salary_periods : []),
+      payDay: hasSavedPayDay
+        ? Math.max(1, Math.min(31, Number(storedMonthlyIncomes.__pundi_pay_day) || 1))
+        : Math.max(1, Math.min(31, Number(profile.pay_day) || 1)),
       strategyMode: profile.strategy_mode,
       passwordHash: undefined,
       securityQuestion: profile.security_question,
@@ -3172,8 +3339,11 @@ export default function App() {
     name: u.name || "",
     age: u.age || null,
     income: u.income || null,
-    monthly_incomes: u.monthlyIncomes || {},
-    monthly_income_prompt_dismissed: getMonthlyPromptDismissals(u),
+    monthly_incomes: {
+      ...(u.monthlyIncomes || {}),
+      __pundi_salary_periods: u.salaryPeriods || [],
+      __pundi_pay_day: Math.max(1, Math.min(31, Number(u.payDay) || 1)),
+    },
     strategy_mode: u.strategyMode || null,
     categories: u.categories || [],
     recurring: u.recurring || [],
@@ -3280,6 +3450,7 @@ export default function App() {
       securityQuestion, securityAnswer,
       name: "", age: null, income: null,
       monthlyIncomes: {},
+      salaryPeriods: [], payDay: 1,
       strategyMode: null,
       categories: [],
       recurring: [],
@@ -3333,6 +3504,7 @@ export default function App() {
       ...user,
       name: "", age: null, income: null,
       monthlyIncomes: {},
+      salaryPeriods: [], payDay: 1,
       monthlyIncomePromptDismissed: {},
       strategyMode: null,
       categories: [],
@@ -3353,28 +3525,35 @@ export default function App() {
     setShowResetAccount(false);
   };
 
-  const handleConfirmMonthIncome = (amount) => {
-    const mKey = nowMonthKey();
-    updateUser({
-      income: amount,
-      monthlyIncomes: { ...(user.monthlyIncomes || {}), [mKey]: amount },
-      monthlyIncomePromptDismissed: {
-        ...getMonthlyPromptDismissals(user),
-        [mKey]: false,
-      },
-    });
-    setShowNewMonthIncome(false);
-  };
-
-  const handleDismissMonthIncome = () => {
-    const month = nowMonthKey();
-    updateUser({
-      monthlyIncomePromptDismissed: {
-        ...getMonthlyPromptDismissals(user),
-        [month]: true,
-      },
-    });
-    setShowNewMonthIncome(false);
+  const handleConfirmMonthIncome = async (amount, startDate, categories, carryover = null) => {
+    const periods = getSalaryPeriods(user);
+    const existing = periods.find((period) => period.startDate === startDate);
+    const nextPeriod = {
+      id: existing?.id || uid(),
+      startDate,
+      amount,
+      categories: categories.map((category) => ({
+        ...category,
+        subs: (category.subs || []).map((sub) => ({ ...sub })),
+      })),
+      carryovers: carryover ? [{ ...carryover }] : [],
+    };
+    const salaryPeriods = [...periods.filter((period) => period.startDate !== startDate), nextPeriod]
+      .sort((a, b) => a.startDate.localeCompare(b.startDate));
+    const nextUser = {
+      ...user,
+      income: Number(salaryPeriods.at(-1)?.amount || amount),
+      salaryPeriods,
+      categories,
+    };
+    try {
+      await persistUser(nextUser);
+    } catch (error) {
+      return error.message || "Profil gagal disimpan.";
+    }
+    setUser(nextUser);
+    setShowAddMoney(false);
+    return true;
   };
 
   const handleDeleteAccount = async () => {
@@ -3479,7 +3658,14 @@ export default function App() {
         <AllocationEditor
           user={user}
           onCancel={() => setPage("dashboard")}
-          onSave={(categories) => { updateUser({ categories }); setPage("dashboard"); }}
+          onSave={(categories) => {
+            const activePeriod = getActivePeriod(user);
+            const salaryPeriods = getSalaryPeriods(user).map((period) =>
+              period.id === activePeriod.id ? { ...period, categories } : period
+            );
+            updateUser({ categories, salaryPeriods });
+            setPage("dashboard");
+          }}
         />
       );
     } else if (page === "monthlyHistory") {
@@ -3544,12 +3730,11 @@ export default function App() {
           accountLoaded={accountLoaded}
           onOpenCategory={(id) => { setActiveCategoryId(id); setPage("category"); }}
           onEditAlloc={() => setPage("editAlloc")}
-          onAddMoney={() => setShowAddMoney(true)}
+          onAddMoney={() => setShowAddMoney("global")}
           onViewHistory={() => setPage("monthlyHistory")}
           onOpenSettings={() => setPage("settings")}
           onOpenGoals={() => setPage("goals")}
           onOpenCalculator={() => setPage("calculator")}
-          onConfirmMonthIncome={() => setShowNewMonthIncome(true)}
           onLogout={handleLogout}
         />
       );
@@ -3563,8 +3748,11 @@ export default function App() {
       {showAddMoney && (
         <AddMoneyModal
           user={user}
+          transactions={transactions}
+          initialTarget={showAddMoney === "salary" ? "salary" : "global"}
           onClose={() => setShowAddMoney(false)}
           onSubmit={(tx) => { handleAddTx(tx); setShowAddMoney(false); }}
+          onSalarySubmit={handleConfirmMonthIncome}
         />
       )}
       {showResetAccount && (
@@ -3579,13 +3767,6 @@ export default function App() {
           user={user}
           onClose={() => setShowDeleteAccount(false)}
           onConfirm={handleDeleteAccount}
-        />
-      )}
-      {showNewMonthIncome && (
-        <NewMonthIncomeModal
-          user={user}
-          onClose={handleDismissMonthIncome}
-          onConfirm={handleConfirmMonthIncome}
         />
       )}
       <AppFooter />
@@ -3694,6 +3875,44 @@ const STYLE = `
   display:flex; align-items:center; justify-content:center; z-index: 50; padding: 16px;
   backdrop-filter: blur(2px);
 }
+.mmp-app .add-money-modal-salary{
+  display:flex;
+  flex-direction:column;
+  min-height:0;
+  overflow:hidden;
+}
+.mmp-app .add-money-modal-content-salary{
+  flex:1 1 auto;
+  min-height:0;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  scrollbar-width:thin;
+  scrollbar-color:var(--border) transparent;
+  scroll-behavior:smooth;
+  padding:0 6px 4px 0;
+  gap:12px;
+}
+.mmp-app .add-money-modal-content-salary::-webkit-scrollbar{ width:6px; }
+.mmp-app .add-money-modal-content-salary::-webkit-scrollbar-track{ background:transparent; }
+.mmp-app .add-money-modal-content-salary::-webkit-scrollbar-thumb{ background:var(--border); border-radius:9999px; }
+.mmp-app .add-money-modal-content-salary::-webkit-scrollbar-thumb:hover{ background:var(--gold); }
+.mmp-app .salary-target-list{
+  display:grid;
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+}
+.mmp-app .salary-target-list > button{
+  min-width:0;
+  text-align:center;
+  white-space:normal;
+}
+.mmp-app .salary-target-list > button:last-child{ grid-column:1 / -1; }
+.mmp-app .salary-submit{
+  position:sticky;
+  bottom:0;
+  z-index:1;
+  flex-shrink:0;
+  box-shadow:0 -8px 14px var(--surface);
+}
 .mmp-app .check-badge{
   width:56px; height:56px; border-radius:9999px; background:var(--gold);
   display:flex; align-items:center; justify-content:center; margin: 0 auto;
@@ -3763,6 +3982,7 @@ const STYLE = `
 
   .mmp-app .modal-overlay{ align-items:flex-start; overflow-y:auto; padding:12px; }
   .mmp-app .modal-overlay > .card{ margin:auto 0; max-height:calc(100vh - 24px); overflow-y:auto; }
+  .mmp-app .modal-overlay > .add-money-modal-salary{ overflow:hidden; }
 
   .mmp-app .cat-card{ width:100%; min-width:0; }
   .mmp-app [style*="grid-template-columns"]{ grid-template-columns:1fr !important; }
