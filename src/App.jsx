@@ -20,7 +20,7 @@ const isWithdrawTx = (t) => t.type === "withdraw";
 const isAssetTopupTx = (t) => t.type === "asset_topup" || t.directAsset;
 const isAssetOpeningTx = (t) => t.type === "asset_opening" || t.type === "asset_topup";
 const isAssetMonthlyDepositTx = (t) => t.type === "expense" || !t.type;
-const isDepositTx = (t) => isAssetMonthlyDepositTx(t) || isAssetOpeningTx(t); // all money already held by an asset
+const isDepositTx = (t) => isAssetOpeningTx(t) || !!t.directAsset;
 const monthLabelFor = (mKey) => {
   const [y, m] = mKey.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("id-ID", { month: "long", year: "numeric" });
@@ -115,14 +115,33 @@ const DEFAULT_CATEGORIES = [
   { id: "save", name: "Tabungan & Investasi", percent: 20, subs: [], isAsset: true },
 ];
 
-/* For an isAsset category, money doesn't just "disappear" like a normal expense —
-   it moves into an asset you still own. assetBalance tracks that cumulative,
-   never-resets balance: all-time deposits minus all-time withdrawals.
-   subId === undefined means "don't filter by sub" (whole-category total);
-   pass null explicitly to mean "only entries with no sub tagged". */
-function assetBalance(transactions, catId, subId = undefined) {
+function getAssetCategoryCatalog(user) {
+  const categories = new Map();
+  const allCategories = [
+    ...(user.assetArchive || []),
+    ...(user.categories || []),
+    ...getSalaryPeriods(user).flatMap((period) => period.categories || []),
+  ];
+  allCategories.forEach((category) => {
+    if (!category.isAsset) return;
+    const current = categories.get(category.id);
+    categories.set(category.id, {
+      ...category,
+      name: category.name || current?.name || "Aset arsip",
+      subs: category.subs?.length ? category.subs : (current?.subs || []),
+    });
+  });
+  return [...categories.values()];
+}
+
+/* Asset deposits and withdrawals remain attached to their historical category
+   even after that category is removed from the current allocation plan. */
+function assetBalance(transactions, catId, subId = undefined, user = null) {
+  const assetCategoryIds = new Set(user ? getAssetCategoryCatalog(user).map((category) => category.id) : []);
   const matches = (t) => t.categoryId === catId && (subId === undefined ? true : (t.subId || null) === subId);
-  const deposits = transactions.filter((t) => matches(t) && isDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0);
+  const deposits = transactions.filter((t) => matches(t) && (
+    isDepositTx(t) || (assetCategoryIds.has(t.categoryId) && isAssetMonthlyDepositTx(t))
+  )).reduce((s, t) => s + Number(t.amount), 0);
   const withdrawals = transactions.filter((t) => matches(t) && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   return deposits - withdrawals;
 }
@@ -1372,9 +1391,12 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
   const cashIncome = income + totalTopup;
   const thisMonthNet = cashIncome - totalSpent;
   const balance = cumulativeBalanceUpTo(user, transactions, todayStr());
-  const totalAssets = user.categories
-    .filter((category) => category.isAsset)
-    .reduce((sum, category) => sum + assetBalance(transactions, category.id), 0);
+  const assetCatalog = getAssetCategoryCatalog(user);
+  const activeAssetIds = new Set(user.categories.filter((category) => category.isAsset).map((category) => category.id));
+  const archivedAssets = assetCatalog.filter((category) =>
+    !activeAssetIds.has(category.id) && transactions.some((transaction) => transaction.categoryId === category.id)
+  );
+  const totalAssets = assetCatalog.reduce((sum, category) => sum + assetBalance(transactions, category.id, undefined, user), 0);
   const totalEquity = balance + totalAssets;
   const prevCarry = balance - thisMonthNet;
 
@@ -1482,7 +1504,7 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
                   {c.isAsset ? (
                     <>
                       <p className="muted text-xs">Saldo total aset</p>
-                      <p className="tabular" style={{ fontWeight: 700, color: "var(--teal)" }}>{rupiah(assetBalance(transactions, c.id))}</p>
+                      <p className="tabular" style={{ fontWeight: 700, color: "var(--teal)" }}>{rupiah(assetBalance(transactions, c.id, undefined, user))}</p>
                       <ProgressBar percent={pct} color={pct > 100 ? "var(--rose)" : pct >= 80 ? "#D9A441" : COLORS[i % COLORS.length]} />
                       <div className="flex justify-between mt-2 text-xs tabular">
                         <span className="muted">Setor bulan ini {rupiah(spent)}</span>
@@ -1512,6 +1534,30 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
             })}
           </div>
         </div>
+        {archivedAssets.length > 0 && (
+          <section>
+            <p className="muted text-xs uppercase tracking-wide mb-3">Aset arsip</p>
+            <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
+              {archivedAssets.map((category) => {
+                const assetTransactions = transactions.filter((transaction) => transaction.categoryId === category.id);
+                const totalWithdrawn = assetTransactions.filter(isWithdrawTx).reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+                return (
+                  <div key={category.id} className="card2 p-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium">{category.name}</span>
+                      <span className="text-xs" style={{ color: "var(--gold)" }}>Arsip</span>
+                    </div>
+                    <p className="muted text-xs mt-2">Saldo tersisa</p>
+                    <p className="tabular" style={{ fontWeight: 700, color: "var(--teal)" }}>
+                      {rupiah(assetBalance(transactions, category.id, undefined, user))}
+                    </p>
+                    {totalWithdrawn > 0 && <p className="muted text-xs mt-1">Total ditarik {rupiah(totalWithdrawn)}</p>}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );
@@ -1555,7 +1601,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const netAssetMovement = isAsset ? deposited - withdrawn : spent;
   const remaining = allocated - (isAsset ? netAssetMovement : spent);
   const catPct = allocated > 0 ? ((isAsset ? netAssetMovement : spent) / allocated) * 100 : 0;
-  const catSaldo = assetBalance(transactions, cat.id);
+  const catSaldo = assetBalance(transactions, cat.id, undefined, user);
   const history = allMonthTx.filter((t) => t.categoryId === cat.id).sort((a, b) => (a.date < b.date ? 1 : -1));
   const filteredHistory = search.trim()
     ? history.filter((t) => {
@@ -1596,7 +1642,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const submitTarik = () => {
     const amt = Number(amount);
     if (!(amt > 0)) { setFormError("Masukkan jumlah yang valid."); return; }
-    const cap = subId ? assetBalance(transactions, cat.id, subId) : catSaldo;
+    const cap = subId ? assetBalance(transactions, cat.id, subId, user) : catSaldo;
     if (amt > cap) { setFormError(`Saldo tidak mencukupi. Saldo tersedia saat ini ${rupiah(cap)}.`); return; }
     setFormError("");
     onAddTx({ id: uid(), type: "withdraw", categoryId: cat.id, subId: subId || null, amount: amt, note: note.trim(), date });
@@ -1690,7 +1736,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
                 const subSpent = spentForSub(s.id) - (isAsset ? withdrawnForSub(s.id) : 0);
                 const subRemaining = subAlloc - subSpent;
                 const subPct = subAlloc > 0 ? (subSpent / subAlloc) * 100 : 0;
-                const subSaldo = assetBalance(transactions, cat.id, s.id);
+                const subSaldo = assetBalance(transactions, cat.id, s.id, user);
                 return (
                   <div key={s.id} className="card2 p-3 anim-fade-up" style={{ animationDelay: `${si * 60}ms` }}>
                     <div className="flex justify-between text-sm mb-1">
@@ -1727,7 +1773,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
               <p className="muted text-xs mb-3">
                     {assetMode === "setor"
                   ? <>Sisa target setor periode ini: <span className="tabular" style={{ color: remaining < 0 ? "var(--rose)" : "var(--teal)" }}>{rupiah(remaining)}</span></>
-                  : <>Saldo tersedia untuk ditarik: <span className="tabular" style={{ color: "var(--teal)" }}>{rupiah(subId ? assetBalance(transactions, cat.id, subId) : catSaldo)}</span></>}
+                  : <>Saldo tersedia untuk ditarik: <span className="tabular" style={{ color: "var(--teal)" }}>{rupiah(subId ? assetBalance(transactions, cat.id, subId, user) : catSaldo)}</span></>}
               </p>
             </>
           ) : (
@@ -2283,7 +2329,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
                       <ChevronRight size={14} className="muted" style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
                     </span>
                     <span className="tabular text-xs muted">
-                      {c.isAsset ? <>saldo total {rupiah(assetBalance(transactions, c.id))}</> : <>{rupiah(spent)} / {rupiah(allocated)}</>}
+                      {c.isAsset ? <>saldo total {rupiah(assetBalance(transactions, c.id, undefined, user))}</> : <>{rupiah(spent)} / {rupiah(allocated)}</>}
                     </span>
                   </button>
                   <div className="mt-2"><ProgressBar percent={pct} color={pct > 100 ? "var(--rose)" : pct >= 80 ? "#D9A441" : COLORS[i % COLORS.length]} /></div>
@@ -2653,6 +2699,7 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
         name: user.name, age: user.age, income: user.income,
         monthlyIncomes: user.monthlyIncomes || {},
         salaryPeriods: user.salaryPeriods || [], payDay: user.payDay || 1,
+        assetArchive: user.assetArchive || [],
         strategyMode: user.strategyMode, categories: user.categories,
         recurring: user.recurring || [], goals: user.goals || [],
       },
@@ -2679,6 +2726,7 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
             : (u.income ? { [nowMonthKey()]: u.income } : {}),
           salaryPeriods: Array.isArray(u.salaryPeriods) ? u.salaryPeriods : [],
           payDay: Math.max(1, Math.min(31, Number(u.payDay) || 1)),
+          assetArchive: Array.isArray(u.assetArchive) ? u.assetArchive : [],
           strategyMode: u.strategyMode || "custom", categories: u.categories,
           recurring: Array.isArray(u.recurring) ? u.recurring : [],
           goals: Array.isArray(u.goals) ? u.goals : [],
@@ -2704,6 +2752,7 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
         monthlyIncomes: localUser.monthlyIncomes || {},
         salaryPeriods: Array.isArray(localUser.salaryPeriods) ? localUser.salaryPeriods : [],
         payDay: Math.max(1, Math.min(31, Number(localUser.payDay) || 1)),
+        assetArchive: Array.isArray(localUser.assetArchive) ? localUser.assetArchive : [],
         strategyMode: localUser.strategyMode || null, categories: localUser.categories || [],
         recurring: localUser.recurring || [], goals: localUser.goals || [],
         confirmed: !!localUser.confirmed, stage: localUser.stage || "dashboard",
@@ -3307,6 +3356,7 @@ export default function App() {
       payDay: hasSavedPayDay
         ? Math.max(1, Math.min(31, Number(storedMonthlyIncomes.__pundi_pay_day) || 1))
         : Math.max(1, Math.min(31, Number(profile.pay_day) || 1)),
+      assetArchive: Array.isArray(storedMonthlyIncomes.__pundi_asset_archive) ? storedMonthlyIncomes.__pundi_asset_archive : [],
       strategyMode: profile.strategy_mode,
       passwordHash: undefined,
       securityQuestion: profile.security_question,
@@ -3343,6 +3393,7 @@ export default function App() {
       ...(u.monthlyIncomes || {}),
       __pundi_salary_periods: u.salaryPeriods || [],
       __pundi_pay_day: Math.max(1, Math.min(31, Number(u.payDay) || 1)),
+      __pundi_asset_archive: u.assetArchive || [],
     },
     strategy_mode: u.strategyMode || null,
     categories: u.categories || [],
@@ -3451,6 +3502,7 @@ export default function App() {
       name: "", age: null, income: null,
       monthlyIncomes: {},
       salaryPeriods: [], payDay: 1,
+      assetArchive: [],
       strategyMode: null,
       categories: [],
       recurring: [],
@@ -3505,6 +3557,7 @@ export default function App() {
       name: "", age: null, income: null,
       monthlyIncomes: {},
       salaryPeriods: [], payDay: 1,
+      assetArchive: [],
       monthlyIncomePromptDismissed: {},
       strategyMode: null,
       categories: [],
@@ -3660,10 +3713,15 @@ export default function App() {
           onCancel={() => setPage("dashboard")}
           onSave={(categories) => {
             const activePeriod = getActivePeriod(user);
+            const retainedAssetIds = new Set(categories.filter((category) => category.isAsset).map((category) => category.id));
+            const archiveById = new Map((user.assetArchive || []).map((category) => [category.id, category]));
+            user.categories.filter((category) => category.isAsset && !retainedAssetIds.has(category.id)).forEach((category) => {
+              archiveById.set(category.id, category);
+            });
             const salaryPeriods = getSalaryPeriods(user).map((period) =>
               period.id === activePeriod.id ? { ...period, categories } : period
             );
-            updateUser({ categories, salaryPeriods });
+            updateUser({ categories, salaryPeriods, assetArchive: [...archiveById.values()] });
             setPage("dashboard");
           }}
         />
