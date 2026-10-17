@@ -18,6 +18,38 @@ function redactApiKey(value: string, apiKey: string) {
   return value.replaceAll(apiKey, "[redacted]");
 }
 
+function parseAssistantResponse(content: string) {
+  const normalized = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  try {
+    return JSON.parse(normalized);
+  } catch (error) {
+    for (let start = normalized.indexOf("{"); start !== -1; start = normalized.indexOf("{", start + 1)) {
+      let depth = 0;
+      let inString = false;
+      let escaped = false;
+      for (let index = start; index < normalized.length; index++) {
+        const character = normalized[index];
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (character === "\\") escaped = true;
+          else if (character === "\"") inString = false;
+          continue;
+        }
+        if (character === "\"") inString = true;
+        else if (character === "{") depth++;
+        else if (character === "}" && --depth === 0) {
+          try {
+            return JSON.parse(normalized.slice(start, index + 1));
+          } catch {
+            break;
+          }
+        }
+      }
+    }
+    throw error;
+  }
+}
+
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (request.method !== "POST") return jsonResponse({ error: "Method not allowed." }, 405);
@@ -120,6 +152,53 @@ Deno.serve(async (request) => {
     }));
   const model = Deno.env.get("GEMINI_MODEL") || "gemini-3.8-flash";
   const endpoint = "https://generativelanguage.googleapis.com/v1beta/interactions";
+  const responseSchema = {
+    type: "object",
+    properties: {
+      reply: { type: "string" },
+      actions: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            type: { type: "string", enum: ["add_transaction", "add_salary_period", "set_allocations", "add_goal"] },
+            transactionType: { type: "string" },
+            amount: { type: "number" },
+            date: { type: "string" },
+            categoryId: { type: "string" },
+            subId: { type: "string" },
+            note: { type: "string" },
+            allocations: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  categoryId: { type: "string" },
+                  percent: { type: "number" },
+                },
+                required: ["categoryId", "percent"],
+              },
+            },
+            goalName: { type: "string" },
+            goalTarget: { type: "number" },
+          },
+          required: [
+            "type",
+            "transactionType",
+            "amount",
+            "date",
+            "categoryId",
+            "subId",
+            "note",
+            "allocations",
+            "goalName",
+            "goalTarget",
+          ],
+        },
+      },
+    },
+    required: ["reply", "actions"],
+  };
   let geminiResponse: Response;
   try {
     geminiResponse = await fetch(endpoint, {
@@ -134,6 +213,11 @@ Deno.serve(async (request) => {
         input: `Riwayat percakapan (JSON, berurutan dari awal): ${JSON.stringify(conversation)}`,
         generation_config: {
           max_output_tokens: 1200,
+        },
+        response_format: {
+          type: "text",
+          mime_type: "application/json",
+          schema: responseSchema,
         },
         store: false,
       }),
@@ -207,8 +291,8 @@ Deno.serve(async (request) => {
   }
 
   try {
-    const result = JSON.parse(content);
-    if (typeof result.reply !== "string" || !Array.isArray(result.actions)) {
+    const result = parseAssistantResponse(content);
+    if (!result || typeof result.reply !== "string" || !Array.isArray(result.actions)) {
       throw new Error("Invalid response shape.");
     }
     const validActions = result.actions.filter((action: Record<string, unknown>) => {
