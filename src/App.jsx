@@ -3308,13 +3308,19 @@ function AssistantChat({ user, transactions, onApplyAction }) {
       )}
       <button
         type="button"
-        aria-label={open ? "Tutup Asisten Pundi" : "Buka Asisten Pundi"}
-        title="Asisten Pundi"
-        onClick={() => setOpen((current) => !current)}
-        style={{ position: "fixed", right: 20, bottom: 20, zIndex: 101, width: 58, height: 58, borderRadius: "50%", border: "1px solid var(--gold)", background: "var(--gold)", color: "#101815", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 8px 24px rgba(0,0,0,.35)", cursor: "pointer" }}
+        aria-label="Asisten Pundi sedang dalam pemeliharaan"
+        title="Asisten Pundi sedang dalam pemeliharaan"
+        disabled
+        style={{ position: "fixed", right: 20, bottom: 20, zIndex: 101, width: 58, height: 58, borderRadius: "50%", border: "1px solid var(--border)", background: "var(--surface2)", color: "var(--muted)", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 8px 24px rgba(0,0,0,.25)", cursor: "not-allowed", opacity: 0.75 }}
       >
-        {open ? <X size={23} /> : <><MessageCircle size={23} /><Bot size={14} style={{ position: "absolute", marginTop: 22, marginLeft: 22, background: "var(--gold)", borderRadius: 999 }} /></>}
+        <><MessageCircle size={23} /><Bot size={14} style={{ position: "absolute", marginTop: 22, marginLeft: 22, background: "var(--surface2)", borderRadius: 999 }} /></>
       </button>
+      <span
+        role="status"
+        style={{ position: "fixed", right: 20, bottom: 84, zIndex: 101, padding: "6px 10px", borderRadius: 999, background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--muted)", fontSize: 11, boxShadow: "0 4px 14px rgba(0,0,0,.2)" }}
+      >
+        Asisten dalam pemeliharaan
+      </span>
     </>
   );
 }

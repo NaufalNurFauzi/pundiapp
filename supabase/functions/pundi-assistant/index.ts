@@ -139,6 +139,7 @@ Deno.serve(async (request) => {
     "Aksi set_allocations harus menyertakan semua kategori aktif yang ada di konteks tepat satu kali, dengan persen 0 sampai 100 dan total tepat 100. Jangan mengubah nama atau membuat kategori baru.",
     "Aksi add_goal memerlukan nama, nominal target, kategori, dan sub-kategori yang valid dari konteks akun.",
     "Jika detail tindakan belum lengkap, ajukan pertanyaan alih-alih membuat aksi. Tolak permintaan untuk menghapus akun/data secara massal atau melakukan tindakan yang tidak tersedia.",
+    "Jawab dengan ringkas dan fokus; jika tidak diminta penjelasan rinci, batasi jawaban pada beberapa kalimat.",
     "Keluarkan hanya JSON valid berbentuk {\"reply\":\"jawaban\",\"actions\":[...]}. Setiap action harus memuat seluruh kunci type, transactionType, amount, date, categoryId, subId, note, allocations, goalName, goalTarget. Untuk kunci yang tidak relevan gunakan string kosong, angka 0, atau array kosong. Tipe action hanya add_transaction, add_salary_period, set_allocations, add_goal. Untuk jawaban biasa atau penolakan, actions harus berupa array kosong.",
   ].join("\n");
 
@@ -199,32 +200,43 @@ Deno.serve(async (request) => {
     },
     required: ["reply", "actions"],
   };
-  let geminiResponse: Response;
+  let geminiResponse: Response | null = null;
   try {
-    geminiResponse = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "x-goog-api-key": geminiApiKey,
-        "Content-Type": "application/json",
+    const requestBody = JSON.stringify({
+      model,
+      system_instruction: `${systemPrompt}${contextInstruction}`,
+      input: `Riwayat percakapan (JSON, berurutan dari awal): ${JSON.stringify(conversation)}`,
+      generation_config: {
+        max_output_tokens: 2400,
       },
-      body: JSON.stringify({
-        model,
-        system_instruction: `${systemPrompt}${contextInstruction}`,
-        input: `Riwayat percakapan (JSON, berurutan dari awal): ${JSON.stringify(conversation)}`,
-        generation_config: {
-          max_output_tokens: 1200,
-        },
-        response_format: {
-          type: "text",
-          mime_type: "application/json",
-          schema: responseSchema,
-        },
-        store: false,
-      }),
+      response_format: {
+        type: "text",
+        mime_type: "application/json",
+        schema: responseSchema,
+      },
+      store: false,
     });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      geminiResponse = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "x-goog-api-key": geminiApiKey,
+          "Content-Type": "application/json",
+        },
+        body: requestBody,
+      });
+      if (geminiResponse.status !== 503 || attempt === 2) break;
+      await geminiResponse.text();
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+    }
   } catch (error) {
     console.error("Unable to reach Gemini.", error);
     return jsonResponse({ error: "Layanan AI tidak dapat dihubungi. Coba lagi nanti." }, 502);
+  }
+
+  if (!geminiResponse) {
+    console.error("Gemini request ended without a response.");
+    return jsonResponse({ error: "Layanan AI tidak mengembalikan respons. Coba lagi nanti." }, 502);
   }
 
   if (!geminiResponse.ok) {
@@ -237,6 +249,11 @@ Deno.serve(async (request) => {
       return jsonResponse({
         error: "Batas penggunaan Gemini tercapai. Periksa kuota dan billing Google AI, lalu coba lagi nanti.",
       }, 429);
+    }
+    if (geminiResponse.status === 503) {
+      return jsonResponse({
+        error: "Gemini sedang mengalami permintaan tinggi. Sistem sudah mencoba ulang, tetapi layanan masih sibuk. Tunggu sebentar lalu coba lagi.",
+      }, 503);
     }
     if (geminiResponse.status === 400) {
       let details = "";
@@ -334,7 +351,17 @@ Deno.serve(async (request) => {
       actions: payload.context ? validActions : [],
     });
   } catch (error) {
-    console.error("Gemini returned an invalid structured response.", error);
+    console.error("Gemini returned an invalid structured response.", {
+      error,
+      outputLength: content.length,
+      interactionStatus: interaction.status,
+      usage: interaction.usage,
+    });
+    if (error instanceof SyntaxError) {
+      return jsonResponse({
+        error: "Jawaban Gemini tidak lengkap atau tidak terbaca. Coba kirim ulang; jika berulang, periksa log fungsi untuk status respons.",
+      }, 502);
+    }
     return jsonResponse({ error: "Asisten memberikan respons yang tidak valid. Silakan coba lagi." }, 502);
   }
 });
