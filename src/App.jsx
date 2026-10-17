@@ -1,9 +1,10 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { appUrl, supabase } from "./lib/supabase";
+import { authCallbackUrl, supabase } from "./lib/supabase";
 import {
   LogIn, UserPlus, ArrowRight, ArrowLeft, Check, Pencil, Plus, Trash2,
   LogOut, Wallet, ChevronRight, AlertCircle, X, Settings, Search,
-  Sun, Moon, Download, Upload, Repeat, Target, TrendingUp, Calculator, Info
+  Sun, Moon, Download, Upload, Repeat, Target, TrendingUp, Calculator, Info,
+  Bug, Image, Send, Bot, MessageCircle, Sparkles
 } from "lucide-react";
 
 /* ---------- helpers ---------- */
@@ -21,11 +22,6 @@ const isAssetTopupTx = (t) => t.type === "asset_topup" || t.directAsset;
 const isAssetOpeningTx = (t) => t.type === "asset_opening" || t.type === "asset_topup";
 const isAssetMonthlyDepositTx = (t) => t.type === "expense" || !t.type;
 const isDepositTx = (t) => isAssetOpeningTx(t) || !!t.directAsset;
-const monthLabelFor = (mKey) => {
-  const [y, m] = mKey.split("-").map(Number);
-  return new Date(y, m - 1, 1).toLocaleDateString("id-ID", { month: "long", year: "numeric" });
-};
-
 const dateAtLocalMidnight = (value) => new Date(`${value}T00:00:00`);
 const dateString = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 const dateLabel = (value) => dateAtLocalMidnight(value).toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" });
@@ -90,6 +86,13 @@ function isPaydayReminderDue(user, today = todayStr()) {
   const expectedDate = dateString(new Date(todayDate.getFullYear(), todayDate.getMonth(), expectedDay));
   const latestPeriod = getSalaryPeriods(user).at(-1);
   return today >= expectedDate && (!latestPeriod || latestPeriod.startDate < expectedDate);
+}
+
+function paydayReminderDismissalKey(user, today = todayStr()) {
+  const payDay = Math.max(1, Math.min(31, Number(user.payDay) || 1));
+  const todayDate = dateAtLocalMidnight(today);
+  const expectedDay = Math.min(payDay, new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0).getDate());
+  return `payday:${dateString(new Date(todayDate.getFullYear(), todayDate.getMonth(), expectedDay))}`;
 }
 
 function getMonthlyPromptDismissals(user) {
@@ -282,53 +285,51 @@ function ProgressBar({ percent, color }) {
   );
 }
 
-function SpendingTrendChart({ transactions, currentMonth }) {
-  const [hoveredMonth, setHoveredMonth] = useState(null);
-  const [currentYear, currentMonthNumber] = currentMonth.split("-").map(Number);
-  const months = Array.from({ length: 3 }, (_, index) => {
-    const date = new Date(currentYear, currentMonthNumber - 1 - (2 - index), 1);
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
-  });
-  const values = months.map((month) => ({
-    label: monthLabelFor(month),
-    shortLabel: new Date(`${month}-01T00:00:00`).toLocaleDateString("id-ID", { month: "short" }),
-    total: transactions
-      .filter((transaction) => monthKey(transaction.date) === month && isExpenseTx(transaction))
+function SpendingTrendChart({ user, transactions }) {
+  const [hoveredPeriod, setHoveredPeriod] = useState(null);
+  const periods = getSalaryPeriods(user);
+  const trendPeriods = (periods.length ? periods : [getActivePeriod(user)]).slice(-3);
+  const values = trendPeriods.map((period) => ({
+    id: period.id,
+    label: `Periode mulai ${dateLabel(period.startDate)}`,
+    shortLabel: dateAtLocalMidnight(period.startDate).toLocaleDateString("id-ID", { day: "numeric", month: "short" }),
+    total: transactionsForPeriod(transactions, period, periods)
+      .filter(isExpenseTx)
       .reduce((sum, transaction) => sum + Number(transaction.amount), 0),
   }));
   const maxValue = Math.max(...values.map((value) => value.total), 1);
   const points = values.map((value, index) => ({
     ...value,
-    x: 52 + index * 158,
+    x: values.length === 1 ? 210 : 52 + (index * 316) / (values.length - 1),
     y: 128 - (value.total / maxValue) * 92,
   }));
   const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
-  const hoveredPoint = points.find((point) => point.label === hoveredMonth);
+  const hoveredPoint = points.find((point) => point.id === hoveredPeriod);
 
   return (
     <div className="spending-trend-chart flex flex-col gap-3">
-      <p className="muted text-xs uppercase tracking-wide">Tren Pengeluaran 3 Bulan</p>
+      <p className="muted text-xs uppercase tracking-wide">Tren Pengeluaran per Periode</p>
       <svg width="100%" height="190" viewBox="0 0 420 190" preserveAspectRatio="xMidYMid meet" style={{ overflow: "visible" }}>
         {[36, 82, 128].map((y) => <line key={y} x1="28" y1={y} x2="392" y2={y} stroke="var(--border)" strokeWidth="0.5" opacity="0.5" />)}
         <path d={path} fill="none" stroke="var(--gold)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
         {points.map((point) => (
           <g
-            key={point.label}
-            onMouseEnter={() => setHoveredMonth(point.label)}
-            onMouseLeave={() => setHoveredMonth(null)}
+            key={point.id}
+            onMouseEnter={() => setHoveredPeriod(point.id)}
+            onMouseLeave={() => setHoveredPeriod(null)}
             style={{ cursor: "pointer" }}
           >
             <rect x={point.x - 48} y="16" width="96" height="128" fill="transparent" />
-            <circle cx={point.x} cy={point.y} r={hoveredMonth === point.label ? 6 : 4} fill="var(--gold)" stroke={hoveredMonth === point.label ? "var(--text)" : "none"} strokeWidth="1.5" />
+            <circle cx={point.x} cy={point.y} r={hoveredPeriod === point.id ? 6 : 4} fill="var(--gold)" stroke={hoveredPeriod === point.id ? "var(--text)" : "none"} strokeWidth="1.5" />
             <text x={point.x} y="158" textAnchor="middle" fontSize="11" fill="var(--muted)">{point.shortLabel}</text>
             <title>{`${point.label}: ${rupiah(point.total)}`}</title>
           </g>
         ))}
         {hoveredPoint && (
           <g pointerEvents="none">
-            <rect x={hoveredPoint.x > 300 ? hoveredPoint.x - 142 : hoveredPoint.x + 10} y="12" width="132" height="40" rx="6" fill="var(--surface)" stroke="var(--gold)" />
-            <text x={hoveredPoint.x > 300 ? hoveredPoint.x - 132 : hoveredPoint.x + 20} y="28" fontSize="10" fill="var(--muted)">{hoveredPoint.label}</text>
-            <text x={hoveredPoint.x > 300 ? hoveredPoint.x - 132 : hoveredPoint.x + 20} y="44" fontSize="11" fill="var(--text)" fontWeight="700">{rupiah(hoveredPoint.total)}</text>
+            <rect x={hoveredPoint.x > 300 ? hoveredPoint.x - 158 : hoveredPoint.x + 10} y="12" width="148" height="44" rx="6" fill="var(--surface)" stroke="var(--gold)" />
+            <text x={hoveredPoint.x > 300 ? hoveredPoint.x - 148 : hoveredPoint.x + 20} y="29" fontSize="10" fill="var(--muted)">{hoveredPoint.shortLabel}</text>
+            <text x={hoveredPoint.x > 300 ? hoveredPoint.x - 148 : hoveredPoint.x + 20} y="46" fontSize="11" fill="var(--text)" fontWeight="700">{rupiah(hoveredPoint.total)}</text>
           </g>
         )}
       </svg>
@@ -411,13 +412,40 @@ function DailySpendingChart({ monthTx, periodStart, periodEnd, subCategories = [
           const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
           return <path key={item.id} d={path} fill="none" stroke={item.color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />;
         })}
+        {days.map((date, index) => {
+          const cellWidth = chartWidth / dayCount;
+          const dailyTotal = dailyTotals[index];
+          return (
+            <rect
+              key={`hover-${date}`}
+              x={chartLeft + index * cellWidth}
+              y="0"
+              width={cellWidth}
+              height={chartHeight}
+              fill="transparent"
+              style={{ cursor: "crosshair" }}
+              onMouseEnter={() => setHoveredDay(index + 1)}
+              onMouseLeave={() => setHoveredDay(null)}
+              onFocus={() => setHoveredDay(index + 1)}
+              onBlur={() => setHoveredDay(null)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setHoveredDay(null);
+              }}
+              tabIndex={0}
+              role="button"
+              aria-label={`Pengeluaran ${dateLabel(date)}: ${rupiah(dailyTotal)}`}
+            >
+              <title>{`${dateLabel(date)}: ${rupiah(dailyTotal)}`}</title>
+            </rect>
+          );
+        })}
         {hoveredDay && (
           <g pointerEvents="none">
             <rect
               x={hoveredDay > dayCount * 0.7 ? 250 : 62}
               y="6"
               width="170"
-              height={Math.min(100, 28 + hoveredValues.length * 14)}
+              height={42 + Math.min(4, hoveredValues.filter((item) => item.value > 0).length) * 14}
               rx="6"
               fill="var(--surface)"
               stroke="var(--gold)"
@@ -429,9 +457,9 @@ function DailySpendingChart({ monthTx, periodStart, periodEnd, subCategories = [
               fontSize="10"
               fill="var(--muted)"
             >
-              {hoveredDate}
+              {dateLabel(hoveredDate)} · {rupiah(dailyTotals[hoveredDay - 1])}
             </text>
-            {hoveredValues.filter((item) => item.value > 0).slice(0, 5).map((item, index) => (
+            {hoveredValues.filter((item) => item.value > 0).slice(0, 4).map((item, index) => (
               <text
                 key={`${item.id}-detail`}
                 x={hoveredDay > dayCount * 0.7 ? 260 : 72}
@@ -1368,17 +1396,17 @@ function AppFooter() {
       >
         @naufalnurf__
       </a>
-      <span className="muted"> · v1.2.1</span>
+      <span className="muted"> · v1.3.1</span>
     </footer>
   );
 }
 
-function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout, onEditAlloc, onAddMoney, onViewHistory, onOpenSettings, onOpenGoals, onOpenCalculator }) {
+function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout, onEditAlloc, onAddMoney, onViewHistory, onOpenSettings, onOpenGoals, onOpenCalculator, onDismissIncomeReminder }) {
   const periods = getSalaryPeriods(user);
   const activePeriod = getActivePeriod(user);
-  const activeMonth = monthKey(activePeriod.startDate);
   const periodLabel = `${dateLabel(activePeriod.startDate)} - ${dateLabel(getPeriodEnd(activePeriod, periods) || todayStr())}`;
-  const needsNewMonthIncome = accountLoaded && isPaydayReminderDue(user);
+  const reminderKey = paydayReminderDismissalKey(user);
+  const needsNewMonthIncome = accountLoaded && isPaydayReminderDue(user) && !user.monthlyIncomePromptDismissed?.[reminderKey];
   const income = Number(activePeriod.amount || 0);
 
   const monthTx = transactionsForPeriod(transactions, activePeriod, periods);
@@ -1427,6 +1455,15 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
                 Periode gaji terakhir dimulai <b>{dateLabel(activePeriod.startDate)}</b>. Saat gaji berikutnya diterima, catat lewat <b>Tambah Uang · Gaji Bulanan</b>.
               </p>
             </div>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={onDismissIncomeReminder}
+              aria-label="Tutup pemberitahuan periode gaji"
+              title="Tutup pemberitahuan"
+            >
+              <X size={16} />
+            </button>
           </div>
         )}
 
@@ -1472,7 +1509,7 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
             <AllocationRing categories={user.categories} centerLabel="Total Income" centerValue={effectiveIncome} />
           </div>
           <div className="card p-6 anim-pop stagger-1">
-            <SpendingTrendChart transactions={transactions} currentMonth={activeMonth} />
+            <SpendingTrendChart user={user} transactions={transactions} />
           </div>
         </div>
 
@@ -2680,6 +2717,13 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
   const [importOk, setImportOk] = useState(false);
   const [migrationError, setMigrationError] = useState("");
   const [migrationOk, setMigrationOk] = useState(false);
+  const [feedbackType, setFeedbackType] = useState("bug");
+  const [feedbackDescription, setFeedbackDescription] = useState("");
+  const [feedbackFile, setFeedbackFile] = useState(null);
+  const [feedbackError, setFeedbackError] = useState("");
+  const [feedbackSending, setFeedbackSending] = useState(false);
+  const [feedbackSent, setFeedbackSent] = useState(false);
+  const feedbackFileInputRef = useRef(null);
 
   const profileValid = name.trim() && Number(age) > 0 && Number(income) > 0 && Number(payDay) >= 1 && Number(payDay) <= 31;
   const saveProfile = () => {
@@ -2763,6 +2807,77 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
     }
   };
 
+  const handleFeedbackFileChange = (event) => {
+    const file = event.target.files?.[0] || null;
+    setFeedbackError("");
+    if (!file) {
+      setFeedbackFile(null);
+      return;
+    }
+    if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      setFeedbackError("Foto harus berformat JPG, PNG, atau WebP.");
+      setFeedbackFile(null);
+      event.target.value = "";
+      return;
+    }
+    if (file.size > 4 * 1024 * 1024) {
+      setFeedbackError("Ukuran foto maksimal 4 MB.");
+      setFeedbackFile(null);
+      event.target.value = "";
+      return;
+    }
+    setFeedbackFile(file);
+  };
+
+  const sendFeedback = async (event) => {
+    event.preventDefault();
+    setFeedbackError("");
+    setFeedbackSending(true);
+    try {
+      let attachment;
+      if (feedbackFile) {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(reader.error || new Error("Foto gagal dibaca."));
+          reader.readAsDataURL(feedbackFile);
+        });
+        if (typeof dataUrl !== "string" || !dataUrl.includes(",")) {
+          throw new Error("Foto gagal dibaca. Coba pilih file lain.");
+        }
+        attachment = {
+          fileName: feedbackFile.name,
+          contentType: feedbackFile.type,
+          contentBase64: dataUrl.slice(dataUrl.indexOf(",") + 1),
+        };
+      }
+
+      const { error } = await supabase.functions.invoke("send-feedback", {
+        body: {
+          type: feedbackType,
+          description: feedbackDescription.trim(),
+          attachment,
+        },
+      });
+      if (error) {
+        if (error.context instanceof Response) {
+          const responseBody = await error.context.clone().json().catch(() => null);
+          if (typeof responseBody?.error === "string") throw new Error(responseBody.error);
+        }
+        throw error;
+      }
+      setFeedbackDescription("");
+      setFeedbackFile(null);
+      if (feedbackFileInputRef.current) feedbackFileInputRef.current.value = "";
+      setFeedbackSent(true);
+    } catch (error) {
+      console.error("feedback send failed", error);
+      setFeedbackError(error.message || "Laporan gagal dikirim. Silakan coba lagi.");
+    } finally {
+      setFeedbackSending(false);
+    }
+  };
+
   return (
     <div className="min-h-screen">
       <TopBar name={user.name} onLogout={onLogout} right={
@@ -2809,6 +2924,58 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
         </div>
 
         <div className="card p-6">
+          <div className="flex items-center gap-2 mb-2">
+            <Bug size={16} className="muted" />
+            <p className="muted text-xs uppercase tracking-wide">Laporan bug atau masukan</p>
+          </div>
+          <p className="muted text-sm mb-4">
+            Laporan akan dikirim ke naufalnur7@gmail.com. Foto bersifat opsional.
+          </p>
+          <form className="flex flex-col gap-3" onSubmit={sendFeedback}>
+            <Field label="Jenis laporan">
+              <select value={feedbackType} onChange={(event) => setFeedbackType(event.target.value)}>
+                <option value="bug">Laporkan bug</option>
+                <option value="feedback">Masukan untuk sistem</option>
+              </select>
+            </Field>
+            <Field label="Deskripsi">
+              <textarea
+                value={feedbackDescription}
+                onChange={(event) => setFeedbackDescription(event.target.value)}
+                placeholder="Jelaskan bug yang ditemukan atau masukan yang ingin disampaikan..."
+                rows={5}
+                maxLength={5000}
+                required
+                style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text)", padding: 10, fontSize: 14, resize: "vertical" }}
+              />
+            </Field>
+            <Field label="Foto (opsional, JPG/PNG/WebP maks. 4 MB)">
+              <input
+                ref={feedbackFileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={handleFeedbackFileChange}
+              />
+            </Field>
+            {feedbackFile && (
+              <div className="flex items-center justify-between gap-2 text-sm">
+                <span className="muted flex items-center gap-2"><Image size={14} /> {feedbackFile.name}</span>
+                <button type="button" className="icon-btn" onClick={() => {
+                  setFeedbackFile(null);
+                  if (feedbackFileInputRef.current) feedbackFileInputRef.current.value = "";
+                }} aria-label="Hapus foto">
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+            {feedbackError && <p className="text-sm" role="alert" style={{ color: "var(--rose)" }}>{feedbackError}</p>}
+            <button className="btn-primary flex items-center justify-center gap-2" type="submit" disabled={feedbackSending || !feedbackDescription.trim()}>
+              <Send size={15} /> {feedbackSending ? "Mengirim..." : "Kirim Laporan"}
+            </button>
+          </form>
+        </div>
+
+        <div className="card p-6">
           <p className="muted text-xs uppercase tracking-wide mb-3">Ekspor Data</p>
             <div className="calculator-tabs flex gap-2 flex-wrap">
             <button className="btn-ghost flex items-center gap-2" onClick={exportJson}><Download size={15} /> Backup JSON (semua data)</button>
@@ -2848,7 +3015,307 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
           </div>
         </div>
       </div>
+      {feedbackSent && (
+        <div
+          role="presentation"
+          style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,.65)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+        >
+          <div className="card p-6 flex flex-col items-center gap-3 text-center" role="dialog" aria-modal="true" aria-labelledby="feedback-success-title" style={{ maxWidth: 420, width: "100%" }}>
+            <Check size={28} color="var(--teal)" />
+            <h2 id="feedback-success-title" className="display" style={{ fontSize: 20, fontWeight: 700 }}>Terima kasih atas laporan dan masukannya!</h2>
+            <p className="muted text-sm">Pesanmu berhasil dikirim dan akan kami tinjau.</p>
+            <button type="button" className="btn-primary mt-2" onClick={() => setFeedbackSent(false)}>Tutup</button>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+function assistantActionLabel(action, categories) {
+  const category = categories.find((item) => item.id === action.categoryId);
+  const sub = category?.subs?.find((item) => item.id === action.subId);
+  if (action.type === "add_salary_period") {
+    return `Catat gaji ${rupiah(action.amount)} pada ${dateLabel(action.date)}`;
+  }
+  if (action.type === "add_transaction") {
+    const kind = action.transactionType === "topup" ? "Tambahan pemasukan" : action.transactionType === "withdraw" ? "Tarik dana aset" : "Pengeluaran";
+    return `${kind}: ${rupiah(action.amount)}${category ? ` · ${category.name}` : ""}${sub ? ` / ${sub.name}` : ""} · ${dateLabel(action.date)}${action.note ? ` · ${action.note}` : ""}`;
+  }
+  if (action.type === "set_allocations") {
+    return `Ubah alokasi: ${(action.allocations || []).map((item) => {
+      const name = categories.find((categoryItem) => categoryItem.id === item.categoryId)?.name || item.categoryId;
+      return `${name} ${item.percent}%`;
+    }).join(", ")}`;
+  }
+  if (action.type === "add_goal") {
+    return `Tambah target "${action.goalName}" sebesar ${rupiah(action.goalTarget)}`;
+  }
+  return "Usulan tindakan keuangan";
+}
+
+function AssistantChat({ user, transactions, onApplyAction }) {
+  const [open, setOpen] = useState(false);
+  const [includeAccountData, setIncludeAccountData] = useState(false);
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+  const [messages, setMessages] = useState([{
+    id: uid(),
+    role: "assistant",
+    content: "Hai! Aku asisten Pundi. Aku bisa bantu menjelaskan fitur dan memberi panduan pengelolaan keuangan. Kamu juga bisa meminta usulan pencatatan atau perubahan anggaran; semua perubahan harus kamu konfirmasi dulu.",
+    actions: [],
+  }]);
+  const scrollRef = useRef(null);
+  const applyingActionsRef = useRef(new Set());
+  const categories = user.categories || [];
+
+  useEffect(() => {
+    scrollRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages, open, sending]);
+
+  const financialContext = () => {
+    const periods = getSalaryPeriods(user);
+    const activePeriod = getActivePeriod(user);
+    return {
+      monthlyReferenceIncome: Number(user.income || 0),
+      activeSalaryPeriod: {
+        startDate: activePeriod.startDate,
+        amount: Number(activePeriod.amount || 0),
+      },
+      categories: categories.map((category) => ({
+        id: category.id,
+        name: category.name,
+        percent: Number(category.percent || 0),
+        isAsset: !!category.isAsset,
+        subCategories: (category.subs || []).map((sub) => ({
+          id: sub.id,
+          name: sub.name,
+          percent: Number(sub.percent || 0),
+        })),
+      })),
+      savingsGoals: (user.goals || []).map((goal) => ({
+        id: goal.id,
+        name: goal.name,
+        target: Number(goal.target || 0),
+        categoryId: goal.categoryId,
+        subId: goal.subId,
+      })),
+      recentTransactions: transactions.slice(-20).map((transaction) => ({
+        type: transaction.type || "expense",
+        date: transaction.date,
+        amount: Number(transaction.amount || 0),
+        categoryId: transaction.categoryId || null,
+        subId: transaction.subId || null,
+        note: transaction.note || "",
+      })),
+      salaryPeriodsCount: periods.length,
+    };
+  };
+
+  const sendMessage = async (event) => {
+    event.preventDefault();
+    const text = input.trim();
+    if (!text || sending) return;
+    setError("");
+    setInput("");
+    const userMessage = { id: uid(), role: "user", content: text, actions: [] };
+    const nextMessages = [...messages, userMessage];
+    const recentMessages = nextMessages.slice(1).slice(-12);
+    const conversation = recentMessages[0]?.role === "assistant" ? recentMessages.slice(1) : recentMessages;
+    setMessages(nextMessages);
+    setSending(true);
+    try {
+      const { data, error: invokeError } = await supabase.functions.invoke("pundi-assistant", {
+        body: {
+          messages: conversation.map(({ role, content }) => ({ role, content })),
+          context: includeAccountData ? financialContext() : null,
+        },
+      });
+      if (invokeError) {
+        if (invokeError.context instanceof Response) {
+          const responseBody = await invokeError.context.clone().json().catch(() => null);
+          if (typeof responseBody?.error === "string") throw new Error(responseBody.error);
+        }
+        throw invokeError;
+      }
+      if (typeof data?.reply !== "string" || !Array.isArray(data.actions)) {
+        throw new Error("Respons asisten tidak valid. Silakan coba lagi.");
+      }
+      const allowedTypes = new Set(["add_transaction", "add_salary_period", "set_allocations", "add_goal"]);
+      const validActions = data.actions.filter((action) => {
+        if (!action || !allowedTypes.has(action.type)) return false;
+        if (action.type === "add_salary_period") {
+          return Number.isFinite(action.amount) && typeof action.date === "string";
+        }
+        if (action.type === "add_transaction") {
+          return Number.isFinite(action.amount) &&
+            ["expense", "topup", "withdraw"].includes(action.transactionType) &&
+            typeof action.date === "string";
+        }
+        if (action.type === "set_allocations") {
+          return Array.isArray(action.allocations) &&
+            action.allocations.every((item) => item && typeof item.categoryId === "string" && Number.isFinite(item.percent));
+        }
+        return typeof action.goalName === "string" &&
+          Number.isFinite(action.goalTarget) &&
+          typeof action.categoryId === "string" &&
+          typeof action.subId === "string";
+      }).slice(0, 3);
+      setMessages((current) => [...current, {
+        id: uid(),
+        role: "assistant",
+        content: data.reply,
+        actions: validActions.map((action) => ({ ...action, status: "pending" })),
+      }]);
+    } catch (requestError) {
+      console.error("Pundi assistant request failed", requestError);
+      setError(requestError.message || "Asisten sedang tidak tersedia. Coba lagi sebentar.");
+      setInput(text);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const applyAction = async (messageId, actionIndex, action) => {
+    const actionKey = `${messageId}:${actionIndex}`;
+    if (applyingActionsRef.current.has(actionKey)) return;
+    applyingActionsRef.current.add(actionKey);
+    setError("");
+    setMessages((current) => current.map((message) => message.id !== messageId ? message : {
+      ...message,
+      actions: message.actions.map((item, index) => index === actionIndex ? { ...item, status: "applying" } : item),
+    }));
+    try {
+      await onApplyAction(action);
+      setMessages((current) => current.map((message) => message.id !== messageId ? message : {
+        ...message,
+        actions: message.actions.map((item, index) => index === actionIndex ? { ...item, status: "applied" } : item),
+      }));
+    } catch (applyError) {
+      console.error("Pundi assistant action failed", applyError);
+      setMessages((current) => current.map((message) => message.id !== messageId ? message : {
+        ...message,
+        actions: message.actions.map((item, index) => index === actionIndex ? { ...item, status: "failed" } : item),
+      }));
+      setError(applyError.message || "Tindakan gagal diterapkan.");
+    } finally {
+      applyingActionsRef.current.delete(actionKey);
+    }
+  };
+
+  const statusForAction = (status) => {
+    if (status === "applied") return <p className="text-xs mt-2" style={{ color: "var(--teal)" }}>Diterapkan ke akun</p>;
+    if (status === "dismissed") return <p className="muted text-xs mt-2">Usulan ditolak.</p>;
+    return null;
+  };
+
+  return (
+    <>
+      {open && (
+        <section
+          aria-label="Asisten Pundi"
+          className="card p-4 anim-pop"
+          style={{ position: "fixed", right: 20, bottom: 92, zIndex: 100, width: "min(390px, calc(100vw - 32px))", height: "min(620px, calc(100dvh - 120px))", display: "flex", flexDirection: "column", boxShadow: "0 16px 50px rgba(0,0,0,.4)" }}
+        >
+          <header className="flex items-center justify-between gap-2 pb-3" style={{ borderBottom: "1px solid var(--border)" }}>
+            <div className="flex items-center gap-2">
+              <Sparkles size={17} color="var(--gold)" />
+              <div>
+                <p className="display" style={{ fontWeight: 700 }}>Asisten Pundi</p>
+                <p className="muted" style={{ fontSize: 11 }}>Panduan Pundi & keuangan</p>
+              </div>
+            </div>
+            <button type="button" className="icon-btn" onClick={() => setOpen(false)} aria-label="Tutup asisten"><X size={18} /></button>
+          </header>
+
+          <label className="flex items-start gap-2 py-3 text-xs muted" style={{ lineHeight: 1.45 }}>
+            <input
+              type="checkbox"
+              checked={includeAccountData}
+              onChange={(event) => setIncludeAccountData(event.target.checked)}
+              style={{ width: 16, minWidth: 16, marginTop: 1 }}
+            />
+            <span>Sertakan ringkasan anggaran, target, dan 20 transaksi terakhir agar saran lebih personal. Data hanya dikirim saat mengirim pesan dan diproses oleh Google Gemini.</span>
+          </label>
+
+          <div aria-live="polite" style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, padding: "4px 2px 12px" }}>
+            {messages.map((message) => (
+              <div key={message.id} style={{ alignSelf: message.role === "user" ? "flex-end" : "flex-start", width: "min(94%, 340px)" }}>
+                <div
+                  style={{
+                    whiteSpace: "pre-wrap",
+                    overflowWrap: "anywhere",
+                    fontSize: 13,
+                    lineHeight: 1.5,
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    background: message.role === "user" ? "var(--surface2)" : "var(--surface)",
+                    border: "1px solid var(--border)",
+                  }}
+                >{message.content}</div>
+                {message.actions.map((action, index) => (
+                  <div key={`${message.id}-${index}`} className="card2 p-3 mt-2">
+                    <p className="text-xs" style={{ lineHeight: 1.5 }}>{assistantActionLabel(action, categories)}</p>
+                    {statusForAction(action.status)}
+                    {!["applied", "dismissed"].includes(action.status) && (
+                      <>
+                      {action.status === "failed" && <p className="text-xs mt-2" style={{ color: "var(--rose)" }}>Gagal diterapkan. Kamu bisa mencoba lagi.</p>}
+                      <div className="flex gap-2 mt-2">
+                        <button
+                          type="button"
+                          className="btn-primary text-xs"
+                          style={{ padding: "7px 12px" }}
+                          disabled={action.status === "applying"}
+                          onClick={() => applyAction(message.id, index, action)}
+                        >{action.status === "applying" ? "Menyimpan..." : "Terapkan ke akun"}</button>
+                        {action.status === "pending" && <button type="button" className="btn-ghost text-xs" style={{ padding: "7px 12px" }} onClick={() => setMessages((current) => current.map((item) => item.id !== message.id ? item : { ...item, actions: item.actions.map((candidate, actionIndex) => actionIndex === index ? { ...candidate, status: "dismissed" } : candidate) }))}>Tolak</button>}
+                      </div>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ))}
+            {sending && <p className="muted text-xs anim-fade">Asisten sedang menyiapkan jawaban...</p>}
+            <div ref={scrollRef} />
+          </div>
+
+          {error && <p role="alert" className="text-xs mb-2" style={{ color: "var(--rose)" }}>{error}</p>}
+          <form onSubmit={sendMessage} className="flex items-end gap-2 pt-2" style={{ borderTop: "1px solid var(--border)" }}>
+            <textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  void sendMessage(event);
+                }
+              }}
+              placeholder="Tanya soal Pundi atau keuangan..."
+              rows={2}
+              maxLength={2000}
+              disabled={sending}
+              aria-label="Pesan untuk Asisten Pundi"
+              style={{ flex: 1, minWidth: 0, resize: "none", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, color: "var(--text)", padding: 10, fontSize: 13 }}
+            />
+            <button type="submit" className="btn-primary" aria-label="Kirim pesan" disabled={sending || !input.trim()} style={{ padding: 10 }}>
+              <Send size={16} />
+            </button>
+          </form>
+          <p className="muted mt-2" style={{ fontSize: 10 }}>Panduan umum, bukan nasihat keuangan profesional. AI bisa keliru; periksa usulan sebelum menerapkan.</p>
+        </section>
+      )}
+      <button
+        type="button"
+        aria-label={open ? "Tutup Asisten Pundi" : "Buka Asisten Pundi"}
+        title="Asisten Pundi"
+        onClick={() => setOpen((current) => !current)}
+        style={{ position: "fixed", right: 20, bottom: 20, zIndex: 101, width: 58, height: 58, borderRadius: "50%", border: "1px solid var(--gold)", background: "var(--gold)", color: "#101815", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 8px 24px rgba(0,0,0,.35)", cursor: "pointer" }}
+      >
+        {open ? <X size={23} /> : <><MessageCircle size={23} /><Bot size={14} style={{ position: "absolute", marginTop: 22, marginLeft: 22, background: "var(--gold)", borderRadius: 999 }} /></>}
+      </button>
+    </>
   );
 }
 
@@ -3395,6 +3862,7 @@ export default function App() {
       __pundi_pay_day: Math.max(1, Math.min(31, Number(u.payDay) || 1)),
       __pundi_asset_archive: u.assetArchive || [],
     },
+    monthly_income_prompt_dismissed: u.monthlyIncomePromptDismissed || {},
     strategy_mode: u.strategyMode || null,
     categories: u.categories || [],
     recurring: u.recurring || [],
@@ -3486,7 +3954,7 @@ export default function App() {
       email: email.trim(),
       password,
       options: {
-        emailRedirectTo: appUrl,
+        emailRedirectTo: authCallbackUrl,
         data: { username, securityQuestion, securityAnswer },
       },
     });
@@ -3607,6 +4075,126 @@ export default function App() {
     setUser(nextUser);
     setShowAddMoney(false);
     return true;
+  };
+
+  const handleAssistantAction = async (action) => {
+    if (!user || !accountLoaded) throw new Error("Akun belum siap. Muat ulang halaman lalu coba lagi.");
+    const validDate = (value) => {
+      if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const date = dateAtLocalMidnight(value);
+      return !Number.isNaN(date.getTime()) && dateString(date) === value && value <= todayStr();
+    };
+    const positiveAmount = (value) => Number.isFinite(value) && value > 0 && value <= 1_000_000_000_000;
+
+    if (action.type === "add_salary_period") {
+      if (!positiveAmount(action.amount) || !validDate(action.date)) {
+        throw new Error("Nominal atau tanggal gaji tidak valid.");
+      }
+      if (getSalaryPeriods(user).some((period) => period.startDate === action.date)) {
+        throw new Error("Sudah ada periode gaji pada tanggal tersebut. Periksa riwayat periode terlebih dahulu.");
+      }
+      const result = await handleConfirmMonthIncome(action.amount, action.date, user.categories, null);
+      if (result !== true) throw new Error(typeof result === "string" ? result : "Gaji gagal disimpan.");
+      return;
+    }
+
+    if (action.type === "add_transaction") {
+      const { transactionType, amount, date, categoryId, subId, note } = action;
+      if (!["expense", "topup", "withdraw"].includes(transactionType) || !positiveAmount(amount) || !validDate(date)) {
+        throw new Error("Jenis transaksi, nominal, atau tanggal tidak valid.");
+      }
+      const category = categoryId ? user.categories.find((item) => item.id === categoryId) : null;
+      if (categoryId && !category) throw new Error("Kategori yang diusulkan tidak tersedia di akunmu.");
+      if (transactionType !== "topup" && !category) throw new Error("Pilih kategori untuk transaksi ini.");
+      if (subId && !category?.subs?.some((sub) => sub.id === subId)) {
+        throw new Error("Sub-alokasi yang diusulkan tidak tersedia di kategori tersebut.");
+      }
+      if (transactionType === "withdraw" && !category?.isAsset) {
+        throw new Error("Penarikan hanya bisa dicatat pada kategori aset.");
+      }
+      if (transactionType === "withdraw" && amount > assetBalance(transactions, category.id, subId || undefined, user)) {
+        throw new Error("Nominal melebihi saldo aset yang tersedia.");
+      }
+      const transaction = {
+        id: uid(),
+        type: transactionType,
+        categoryId: category?.id || null,
+        subId: subId || null,
+        amount,
+        note: typeof note === "string" ? note.trim().slice(0, 200) : "",
+        date,
+      };
+      await enqueueTransactionSave(user.id, () =>
+        supabase.from("transactions").insert(transactionRow(user.id, transaction))
+      );
+      setTransactions((current) => [...current, transaction].sort((a, b) => a.date.localeCompare(b.date)));
+      return;
+    }
+
+    if (action.type === "set_allocations") {
+      const currentCategories = user.categories || [];
+      const proposed = action.allocations;
+      if (!Array.isArray(proposed) || proposed.length !== currentCategories.length || !currentCategories.length) {
+        throw new Error("Usulan harus mencakup semua kategori aktif.");
+      }
+      const percentages = new Map();
+      for (const item of proposed) {
+        if (
+          !item ||
+          !currentCategories.some((category) => category.id === item.categoryId) ||
+          !Number.isFinite(item.percent) ||
+          item.percent < 0 ||
+          item.percent > 100 ||
+          percentages.has(item.categoryId)
+        ) {
+          throw new Error("Persentase atau kategori dalam usulan tidak valid.");
+        }
+        percentages.set(item.categoryId, item.percent);
+      }
+      const total = [...percentages.values()].reduce((sum, value) => sum + value, 0);
+      if (Math.abs(total - 100) > 0.01) throw new Error("Total alokasi harus tepat 100%.");
+
+      const categories = currentCategories.map((category) => ({
+        ...category,
+        percent: percentages.get(category.id),
+      }));
+      const activePeriod = getActivePeriod(user);
+      const salaryPeriods = getSalaryPeriods(user).map((period) => period.id === activePeriod.id
+        ? { ...period, categories }
+        : period);
+      const nextUser = { ...user, categories, salaryPeriods };
+      await persistUser(nextUser);
+      setUser(nextUser);
+      return;
+    }
+
+    if (action.type === "add_goal") {
+      const category = user.categories.find((item) => item.id === action.categoryId);
+      const sub = category?.subs?.find((item) => item.id === action.subId);
+      if (
+        typeof action.goalName !== "string" ||
+        !action.goalName.trim() ||
+        action.goalName.length > 80 ||
+        !positiveAmount(action.goalTarget) ||
+        !category ||
+        !sub
+      ) {
+        throw new Error("Target perlu nama, nominal, kategori, dan sub-alokasi yang valid.");
+      }
+      const goals = [...(user.goals || []), {
+        id: uid(),
+        name: action.goalName.trim(),
+        target: action.goalTarget,
+        categoryId: category.id,
+        subId: sub.id,
+      }];
+      const nextUser = { ...user, goals };
+      await persistUser(nextUser);
+      setUser(nextUser);
+      return;
+    }
+
+    throw new Error("Jenis tindakan tidak didukung.");
   };
 
   const handleDeleteAccount = async () => {
@@ -3793,6 +4381,12 @@ export default function App() {
           onOpenSettings={() => setPage("settings")}
           onOpenGoals={() => setPage("goals")}
           onOpenCalculator={() => setPage("calculator")}
+          onDismissIncomeReminder={() => updateUser({
+            monthlyIncomePromptDismissed: {
+              ...(user.monthlyIncomePromptDismissed || {}),
+              [paydayReminderDismissalKey(user)]: true,
+            },
+          })}
           onLogout={handleLogout}
         />
       );
@@ -3803,6 +4397,13 @@ export default function App() {
     <div className={"mmp-app" + (theme === "light" ? " theme-light" : "")}>
       <style>{STYLE}</style>
       {content}
+      {user && accountLoaded && !pendingUser && (
+        <AssistantChat
+          user={user}
+          transactions={transactions}
+          onApplyAction={handleAssistantAction}
+        />
+      )}
       {showAddMoney && (
         <AddMoneyModal
           user={user}
