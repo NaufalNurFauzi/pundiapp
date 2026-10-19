@@ -45,7 +45,8 @@ Aplikasi sekarang memakai Supabase Auth dan PostgreSQL untuk akun, profil, serta
 transaksi.
 
 1. Buat project di [supabase.com](https://supabase.com).
-2. Buka **SQL Editor**, lalu jalankan isi [`supabase/schema.sql`](./supabase/schema.sql).
+2. Buka **SQL Editor**, lalu jalankan isi [`supabase/schema.sql`](./supabase/schema.sql)
+   dan [`supabase/feedback.sql`](./supabase/feedback.sql).
 3. Salin `.env.example` menjadi `.env.local`.
 4. Isi `VITE_SUPABASE_URL` dan `VITE_SUPABASE_ANON_KEY` dari **Project Settings →
    API**. Gunakan key `anon`/publishable, bukan `service_role`. Isi
@@ -77,29 +78,12 @@ Supabase berlaku tanpa mengubah kode aplikasi.
 
 ### Pengiriman laporan bug dan masukan
 
-Form laporan di Pengaturan mengirim deskripsi dan foto opsional melalui Supabase
-Edge Function ke `naufalnur7@gmail.com`. Agar pengiriman aktif:
-
-1. Buat API key di [Resend](https://resend.com/api-keys) dan siapkan alamat
-   pengirim yang terverifikasi. Untuk memakai `onboarding@resend.dev`, alamat
-   penerima harus terverifikasi di Resend.
-2. Login dan hubungkan Supabase CLI ke project:
-
-   ```bash
-   npx supabase login
-   npx supabase link --project-ref PROJECT_REF
-   ```
-
-3. Simpan API key sebagai secret Supabase dan deploy fungsi:
-
-   ```bash
-   npx supabase secrets set RESEND_API_KEY=re_your_key RESEND_FROM_EMAIL="Pundi <feedback@your-verified-domain.com>"
-   npx supabase functions deploy send-feedback
-   ```
-
-   `RESEND_FROM_EMAIL` opsional jika menggunakan alamat pengirim uji bawaan
-   Resend. Jangan simpan API key Resend di `.env.local` atau di source code.
-   Form menerima foto JPG, PNG, atau WebP hingga 4 MB.
+Form laporan di Pengaturan menyimpan laporan dan foto opsional langsung ke
+Supabase, tanpa mengirim email atau menggunakan Resend. Jalankan isi
+[`supabase/feedback.sql`](./supabase/feedback.sql) di **Supabase → SQL Editor**
+sekali untuk membuat tabel, bucket foto privat, dan aturan keamanan. Laporan
+dapat dilihat di **Table Editor → bug_reports**; lampiran tersimpan di
+**Storage → bug-report-attachments**.
 
 ### Asisten AI Pundi
 

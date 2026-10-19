@@ -1396,7 +1396,7 @@ function AppFooter() {
       >
         @naufalnurf__
       </a>
-      <span className="muted"> · v1.3.1</span>
+      <span className="muted"> · v1.3.2</span>
     </footer>
   );
 }
@@ -2833,46 +2833,42 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
     event.preventDefault();
     setFeedbackError("");
     setFeedbackSending(true);
+    let attachmentPath = null;
     try {
-      let attachment;
       if (feedbackFile) {
-        const dataUrl = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = () => reject(reader.error || new Error("Foto gagal dibaca."));
-          reader.readAsDataURL(feedbackFile);
-        });
-        if (typeof dataUrl !== "string" || !dataUrl.includes(",")) {
-          throw new Error("Foto gagal dibaca. Coba pilih file lain.");
-        }
-        attachment = {
-          fileName: feedbackFile.name,
-          contentType: feedbackFile.type,
-          contentBase64: dataUrl.slice(dataUrl.indexOf(",") + 1),
-        };
+        const extension = feedbackFile.type === "image/jpeg" ? "jpg" : feedbackFile.type.split("/")[1];
+        attachmentPath = `${user.id}/${crypto.randomUUID()}.${extension}`;
+        const { error: uploadError } = await supabase.storage
+          .from("bug-report-attachments")
+          .upload(attachmentPath, feedbackFile, { contentType: feedbackFile.type, upsert: false });
+        if (uploadError) throw uploadError;
       }
 
-      const { error } = await supabase.functions.invoke("send-feedback", {
-        body: {
-          type: feedbackType,
-          description: feedbackDescription.trim(),
-          attachment,
-        },
+      const { error: insertError } = await supabase.from("bug_reports").insert({
+        user_id: user.id,
+        type: feedbackType,
+        description: feedbackDescription.trim(),
+        attachment_path: attachmentPath,
+        attachment_name: feedbackFile?.name || null,
+        attachment_type: feedbackFile?.type || null,
       });
-      if (error) {
-        if (error.context instanceof Response) {
-          const responseBody = await error.context.clone().json().catch(() => null);
-          if (typeof responseBody?.error === "string") throw new Error(responseBody.error);
+      if (insertError) {
+        if (attachmentPath) {
+          const { error: cleanupError } = await supabase.storage
+            .from("bug-report-attachments")
+            .remove([attachmentPath]);
+          if (cleanupError) console.error("feedback attachment cleanup failed", cleanupError);
         }
-        throw error;
+        throw insertError;
       }
+
       setFeedbackDescription("");
       setFeedbackFile(null);
       if (feedbackFileInputRef.current) feedbackFileInputRef.current.value = "";
       setFeedbackSent(true);
     } catch (error) {
-      console.error("feedback send failed", error);
-      setFeedbackError(error.message || "Laporan gagal dikirim. Silakan coba lagi.");
+      console.error("feedback save failed", error);
+      setFeedbackError(error.message || "Laporan gagal disimpan. Silakan coba lagi.");
     } finally {
       setFeedbackSending(false);
     }
@@ -2929,7 +2925,7 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
             <p className="muted text-xs uppercase tracking-wide">Laporan bug atau masukan</p>
           </div>
           <p className="muted text-sm mb-4">
-            Laporan akan dikirim ke naufalnur7@gmail.com. Foto bersifat opsional.
+            Laporan akan langsung disimpan dengan aman di Supabase untuk ditinjau. Pengiriman email tidak digunakan.
           </p>
           <form className="flex flex-col gap-3" onSubmit={sendFeedback}>
             <Field label="Jenis laporan">
@@ -2949,7 +2945,7 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
                 style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text)", padding: 10, fontSize: 14, resize: "vertical" }}
               />
             </Field>
-            <Field label="Foto (opsional, JPG/PNG/WebP maks. 4 MB)">
+            <Field label="Foto opsional (JPG/PNG/WebP maks. 4 MB)">
               <input
                 ref={feedbackFileInputRef}
                 type="file"
@@ -3022,8 +3018,8 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
         >
           <div className="card p-6 flex flex-col items-center gap-3 text-center" role="dialog" aria-modal="true" aria-labelledby="feedback-success-title" style={{ maxWidth: 420, width: "100%" }}>
             <Check size={28} color="var(--teal)" />
-            <h2 id="feedback-success-title" className="display" style={{ fontSize: 20, fontWeight: 700 }}>Terima kasih atas laporan dan masukannya!</h2>
-            <p className="muted text-sm">Pesanmu berhasil dikirim dan akan kami tinjau.</p>
+            <h2 id="feedback-success-title" className="display" style={{ fontSize: 20, fontWeight: 700 }}>Laporan berhasil disimpan</h2>
+            <p className="muted text-sm">Terima kasih! Laporanmu tersimpan dengan aman di Supabase untuk ditinjau.</p>
             <button type="button" className="btn-primary mt-2" onClick={() => setFeedbackSent(false)}>Tutup</button>
           </div>
         </div>
