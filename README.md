@@ -45,8 +45,9 @@ Aplikasi sekarang memakai Supabase Auth dan PostgreSQL untuk akun, profil, serta
 transaksi.
 
 1. Buat project di [supabase.com](https://supabase.com).
-2. Buka **SQL Editor**, lalu jalankan isi [`supabase/schema.sql`](./supabase/schema.sql)
-   dan [`supabase/feedback.sql`](./supabase/feedback.sql).
+2. Buka **SQL Editor**, lalu jalankan isi [`supabase/schema.sql`](./supabase/schema.sql),
+   [`supabase/feedback.sql`](./supabase/feedback.sql), dan
+   [`supabase/financial_fixes.sql`](./supabase/financial_fixes.sql).
 3. Salin `.env.example` menjadi `.env.local`.
 4. Isi `VITE_SUPABASE_URL` dan `VITE_SUPABASE_ANON_KEY` dari **Project Settings →
    API**. Gunakan key `anon`/publishable, bukan `service_role`. Isi
@@ -84,6 +85,11 @@ Supabase, tanpa mengirim email atau menggunakan Resend. Jalankan isi
 sekali untuk membuat tabel, bucket foto privat, dan aturan keamanan. Laporan
 dapat dilihat di **Table Editor → bug_reports**; lampiran tersimpan di
 **Storage → bug-report-attachments**.
+
+Jalankan juga [`supabase/financial_fixes.sql`](./supabase/financial_fixes.sql)
+di project yang sudah ada untuk menambahkan penyimpanan ID tujuan tabungan dan
+fungsi impor atomik. File ini sekaligus menghapus kolom jawaban pertanyaan
+keamanan lama yang tidak lagi digunakan.
 
 ### Asisten AI Pundi
 

@@ -8,11 +8,14 @@ import {
 } from "lucide-react";
 
 /* ---------- helpers ---------- */
-const uid = () => Math.random().toString(36).slice(2, 9);
+const uid = () => crypto.randomUUID();
 const rupiah = (n) => "Rp" + Math.round(n || 0).toLocaleString("id-ID");
-const todayStr = () => new Date().toISOString().slice(0, 10);
+const todayStr = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+};
 const monthKey = (d) => (d || "").slice(0, 7);
-const nowMonthKey = () => new Date().toISOString().slice(0, 7);
+const nowMonthKey = () => monthKey(todayStr());
 const monthLabel = () =>
   new Date().toLocaleDateString("id-ID", { month: "long", year: "numeric" });
 const isExpenseTx = (t) => t.type !== "topup" && t.type !== "withdraw" && t.type !== "asset_topup" && t.type !== "asset_opening" && !t.directAsset;
@@ -24,6 +27,11 @@ const isAssetMonthlyDepositTx = (t) => t.type === "expense" || !t.type;
 const isDepositTx = (t) => isAssetOpeningTx(t) || !!t.directAsset;
 const dateAtLocalMidnight = (value) => new Date(`${value}T00:00:00`);
 const dateString = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+const isValidDateString = (value, maxDate = todayStr()) => {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value) || value > maxDate) return false;
+  const date = dateAtLocalMidnight(value);
+  return !Number.isNaN(date.getTime()) && dateString(date) === value;
+};
 const dateLabel = (value) => dateAtLocalMidnight(value).toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" });
 const addDays = (value, days) => {
   const date = dateAtLocalMidnight(value);
@@ -76,8 +84,11 @@ function getPeriodCashRemainder(user, transactions, period, beforeDate = null) {
     .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
   const spent = periodTransactions.filter(isExpenseTx)
     .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+  const withdrawals = periodTransactions
+    .filter(isWithdrawTx)
+    .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
   const carriedIn = (period.carryovers || []).reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  return Math.max(0, Number(period.amount || 0) + carriedIn + additionalIncome - spent);
+  return Math.max(0, Number(period.amount || 0) + carriedIn + additionalIncome + withdrawals - spent);
 }
 function isPaydayReminderDue(user, today = todayStr()) {
   const payDay = Math.max(1, Math.min(31, Number(user.payDay) || 1));
@@ -103,14 +114,6 @@ function getMonthlyPromptDismissals(user) {
 }
 
 const COLORS = ["#C9A24B", "#3E8E7E", "#C4604A", "#6E8FB0", "#9B7EBD", "#7FAE8B", "#B58AC4"];
-
-const SECURITY_QUESTIONS = [
-  "Nama hewan peliharaan pertamamu?",
-  "Kota tempat kamu lahir?",
-  "Nama SD kamu dulu?",
-  "Makanan favoritmu?",
-  "Nama panggilan masa kecil?",
-];
 
 const DEFAULT_CATEGORIES = [
   { id: "need", name: "Kebutuhan Pokok", percent: 50, subs: [], isAsset: false },
@@ -150,10 +153,7 @@ function assetBalance(transactions, catId, subId = undefined, user = null) {
 }
 
 /* True "sisa saldo" — a running cash balance that rolls forward across periods.
-  Everything up to and including `dateLimit` counts: all confirmed salary periods
-  + all topups, minus all expenses (normal spending and deposits into savings/assets,
-  since those also leave your spendable cash). Asset withdrawals do not change this
-  total because they only change the asset balance. */
+  Asset withdrawals add the transferred amount back to spendable cash. */
 function cumulativeBalanceUpTo(user, transactions, dateLimit) {
   const totalIncome = getSalaryPeriods(user)
     .filter((period) => period.startDate <= dateLimit)
@@ -161,7 +161,8 @@ function cumulativeBalanceUpTo(user, transactions, dateLimit) {
   const txUpTo = transactions.filter((t) => t.date <= dateLimit);
   const totalTopup = txUpTo.filter(isTopupTx).reduce((s, t) => s + Number(t.amount), 0);
   const totalExpense = txUpTo.filter(isExpenseTx).reduce((s, t) => s + Number(t.amount), 0);
-  return totalIncome + totalTopup - totalExpense;
+  const totalWithdrawals = txUpTo.filter(isWithdrawTx).reduce((s, t) => s + Number(t.amount), 0);
+  return totalIncome + totalTopup + totalWithdrawals - totalExpense;
 }
 
 async function readKey(key, shared = true) {
@@ -192,6 +193,140 @@ const emailKey = (e) => `mmp_email_${e.trim().toLowerCase()}`;
 const SESSION_KEY = "mmp_session";
 const THEME_KEY = "mmp_theme";
 
+function validateBackup(parsed) {
+  const fail = (message) => { throw new Error(message); };
+  if (!parsed || typeof parsed !== "object" || !parsed.user || typeof parsed.user !== "object" || !Array.isArray(parsed.transactions)) {
+    fail("Format backup tidak valid.");
+  }
+  const backupUser = parsed.user;
+  const validateCategories = (categories, label) => {
+    if (!Array.isArray(categories)) fail(`${label} tidak valid.`);
+    const ids = new Set();
+    for (const category of categories) {
+      if (
+        !category || typeof category.id !== "string" || !category.id.trim() || ids.has(category.id)
+        || typeof category.name !== "string" || !category.name.trim()
+        || !Number.isFinite(Number(category.percent)) || Number(category.percent) < 0 || Number(category.percent) > 100
+        || !Array.isArray(category.subs)
+      ) fail(`${label} berisi kategori yang tidak valid.`);
+      ids.add(category.id);
+      const subIds = new Set();
+      for (const sub of category.subs) {
+        if (
+          !sub || typeof sub.id !== "string" || !sub.id.trim() || subIds.has(sub.id)
+          || typeof sub.name !== "string" || !sub.name.trim()
+          || !Number.isFinite(Number(sub.percent)) || Number(sub.percent) < 0 || Number(sub.percent) > 100
+        ) fail(`Sub-alokasi pada "${category.name}" tidak valid.`);
+        subIds.add(sub.id);
+      }
+      if (category.subs.length && Math.abs(category.subs.reduce((sum, sub) => sum + Number(sub.percent), 0) - 100) > 0.11) {
+        fail(`Total sub-alokasi pada "${category.name}" harus 100%.`);
+      }
+    }
+    if (categories.length && Math.abs(categories.reduce((sum, category) => sum + Number(category.percent), 0) - 100) > 0.11) {
+      fail(`${label} harus berjumlah 100%.`);
+    }
+    return categories;
+  };
+
+  const categories = validateCategories(backupUser.categories, "Alokasi kategori");
+  if (backupUser.name != null && typeof backupUser.name !== "string") fail("Nama profil tidak valid.");
+  if (backupUser.age != null && (!Number.isInteger(Number(backupUser.age)) || Number(backupUser.age) < 1 || Number(backupUser.age) > 120)) {
+    fail("Umur pada profil tidak valid.");
+  }
+  if (backupUser.income != null && (!Number.isFinite(Number(backupUser.income)) || Number(backupUser.income) < 0)) {
+    fail("Income pada profil tidak valid.");
+  }
+  const payDay = Number(backupUser.payDay || 1);
+  if (!Number.isInteger(payDay) || payDay < 1 || payDay > 31) fail("Tanggal pengingat gajian tidak valid.");
+
+  const salaryPeriods = backupUser.salaryPeriods == null ? [] : backupUser.salaryPeriods;
+  if (!Array.isArray(salaryPeriods)) fail("Riwayat periode gaji tidak valid.");
+  const periodDates = new Set();
+  for (const period of salaryPeriods) {
+    if (
+      !period || !isValidDateString(period.startDate)
+      || !Number.isFinite(Number(period.amount)) || Number(period.amount) < 0
+      || periodDates.has(period.startDate)
+    ) fail("Data periode gaji tidak valid.");
+    periodDates.add(period.startDate);
+    if (period.categories != null) validateCategories(period.categories, "Alokasi periode gaji");
+  }
+
+  if (backupUser.assetArchive != null && !Array.isArray(backupUser.assetArchive)) fail("Arsip aset tidak valid.");
+  const assetArchive = backupUser.assetArchive || [];
+  if (assetArchive.some((category) => !category || typeof category.id !== "string" || !Array.isArray(category.subs))) {
+    fail("Arsip aset berisi kategori yang tidak valid.");
+  }
+  const transactionIds = new Set();
+  const supportedTypes = new Set(["expense", "topup", "withdraw", "asset_topup", "asset_opening"]);
+  const importedTransactions = parsed.transactions.map((transaction) => {
+    if (
+      !transaction || typeof transaction !== "object"
+      || typeof transaction.id !== "string" || !transaction.id.trim() || transactionIds.has(transaction.id)
+      || !isValidDateString(transaction.date)
+      || !Number.isFinite(Number(transaction.amount)) || Number(transaction.amount) <= 0 || Number(transaction.amount) > 1_000_000_000_000
+      || !supportedTypes.has(transaction.type || "expense")
+      || (transaction.note != null && typeof transaction.note !== "string")
+      || (transaction.categoryId != null && typeof transaction.categoryId !== "string")
+      || (transaction.subId != null && typeof transaction.subId !== "string")
+      || (transaction.goalId != null && typeof transaction.goalId !== "string")
+    ) fail("Ada transaksi dengan ID, tanggal, nominal, atau jenis yang tidak valid.");
+    transactionIds.add(transaction.id);
+    return {
+      ...transaction,
+      type: transaction.type || "expense",
+      categoryId: transaction.categoryId || null,
+      subId: transaction.subId || null,
+      directAsset: !!transaction.directAsset,
+      amount: Number(transaction.amount),
+    };
+  });
+
+  if (backupUser.monthlyIncomes != null && (typeof backupUser.monthlyIncomes !== "object" || Array.isArray(backupUser.monthlyIncomes))) {
+    fail("Riwayat income bulanan tidak valid.");
+  }
+  const monthlyIncomes = backupUser.monthlyIncomes;
+  for (const [month, amount] of Object.entries(monthlyIncomes || {})) {
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month) || !Number.isFinite(Number(amount)) || Number(amount) < 0 || Number(amount) > 1_000_000_000_000) {
+      fail("Riwayat income bulanan tidak valid.");
+    }
+  }
+  const recurring = backupUser.recurring == null ? [] : backupUser.recurring;
+  if (!Array.isArray(recurring) || recurring.some((item) =>
+    !item || typeof item.id !== "string" || !item.id.trim()
+    || typeof item.categoryId !== "string" || typeof item.name !== "string" || !item.name.trim()
+    || (item.subId != null && typeof item.subId !== "string")
+    || !Number.isFinite(Number(item.amount)) || Number(item.amount) <= 0 || Number(item.amount) > 1_000_000_000_000
+  )) fail("Data pengeluaran rutin tidak valid.");
+  const goals = backupUser.goals == null ? [] : backupUser.goals;
+  if (!Array.isArray(goals) || goals.some((goal) =>
+    !goal || typeof goal.id !== "string" || !goal.id.trim()
+    || typeof goal.name !== "string" || !goal.name.trim()
+    || !Number.isFinite(Number(goal.target)) || Number(goal.target) <= 0 || Number(goal.target) > 1_000_000_000_000
+    || typeof goal.categoryId !== "string" || typeof goal.subId !== "string"
+  )) fail("Data tujuan tabungan tidak valid.");
+
+  return {
+    user: {
+      name: backupUser.name || "",
+      age: backupUser.age || null,
+      income: backupUser.income || null,
+      monthlyIncomes: monthlyIncomes || (backupUser.income ? { [nowMonthKey()]: backupUser.income } : {}),
+      salaryPeriods,
+      payDay,
+      assetArchive,
+      strategyMode: backupUser.strategyMode || "custom",
+      categories,
+      recurring,
+      goals,
+      confirmed: true,
+      stage: "dashboard",
+    },
+    transactions: importedTransactions,
+  };
+}
+
 /* Password is hashed (SHA-256) before it's ever written to storage.
    Legacy accounts created before this feature still have a plaintext
    `password` field; verifyPassword accepts that once and upgrades it. */
@@ -221,7 +356,7 @@ function transactionsToCsv(user, transactions) {
     const sub = cat?.subs.find((s) => s.id === t.subId);
     rows.push([
       t.date,
-      isAssetTopupTx(t) ? "Saldo Aset" : isTopupTx(t) ? "Tambahan Dana" : "Pengeluaran",
+      t.goalId && isTopupTx(t) ? "Penarikan Tujuan" : isAssetTopupTx(t) ? "Saldo Aset" : isTopupTx(t) ? "Tambahan Dana" : "Pengeluaran",
       cat ? cat.name : "Seluruh Alokasi",
       sub ? sub.name : "",
       (t.note || "").replace(/"/g, '""'),
@@ -633,8 +768,6 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
   const [password, setPassword] = useState("");
   const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [usernameStatus, setUsernameStatus] = useState("idle");
-  const [securityQuestion, setSecurityQuestion] = useState(SECURITY_QUESTIONS[0]);
-  const [securityAnswer, setSecurityAnswer] = useState("");
 
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
   const passwordsMatch = password === passwordConfirmation;
@@ -673,8 +806,8 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
       if (!emailValid) return;
       onLogin(email.trim(), password);
     } else {
-      if (!username.trim() || usernameStatus !== "available" || !emailValid || !passwordsMatch || !securityAnswer.trim()) return;
-      onRegister(username.trim(), email.trim(), password, securityQuestion, securityAnswer.trim());
+      if (!username.trim() || usernameStatus !== "available" || !emailValid || !passwordsMatch || password.length < 8) return;
+      onRegister(username.trim(), email.trim(), password);
     }
   };
 
@@ -741,7 +874,7 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
                 <span className="text-xs" style={{ color: "var(--rose)" }}>Format email belum valid.</span>
               )}
             </Field>
-            <Field label="Password">
+            <Field label={mode === "register" ? "Password (minimal 8 karakter)" : "Password"}>
               <input
                 type="password"
                 value={password}
@@ -764,19 +897,6 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
                     <span className="text-xs" style={{ color: "var(--rose)" }}>Password tidak sama.</span>
                   )}
                 </Field>
-                <Field label="Pertanyaan Keamanan">
-                  <select value={securityQuestion} onChange={(e) => setSecurityQuestion(e.target.value)}>
-                    {SECURITY_QUESTIONS.map((q) => <option key={q} value={q}>{q}</option>)}
-                  </select>
-                </Field>
-                <Field label="Jawaban">
-                  <input
-                    value={securityAnswer}
-                    onChange={(e) => setSecurityAnswer(e.target.value)}
-                    onKeyDown={onEnter(submit)}
-                    placeholder="Jawabanmu, buat jaga-jaga lupa password"
-                  />
-                </Field>
               </>
             )}
             {mode === "login" && (
@@ -797,7 +917,7 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
             <button
               className="btn-primary flex items-center justify-center gap-2"
               onClick={submit}
-              disabled={busy || !password || !emailValid || (mode === "register" && (usernameStatus !== "available" || !passwordsMatch || !username.trim() || !securityAnswer.trim()))}
+              disabled={busy || !password || !emailValid || (mode === "register" && (usernameStatus !== "available" || !passwordsMatch || password.length < 8 || !username.trim()))}
             >
               {mode === "login" ? "Masuk" : "Buat Akun"} <ArrowRight size={16} />
             </button>
@@ -1417,7 +1537,8 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
   const effectiveIncome = income + globalTopup;
   const totalSpent = expenses.reduce((s, t) => s + Number(t.amount), 0);
   const cashIncome = income + totalTopup;
-  const thisMonthNet = cashIncome - totalSpent;
+  const periodWithdrawals = monthTx.filter(isWithdrawTx).reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+  const thisMonthNet = cashIncome + periodWithdrawals - totalSpent;
   const balance = cumulativeBalanceUpTo(user, transactions, todayStr());
   const assetCatalog = getAssetCategoryCatalog(user);
   const activeAssetIds = new Set(user.categories.filter((category) => category.isAsset).map((category) => category.id));
@@ -1669,7 +1790,8 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
 
   const submitSetor = () => {
     const amt = Number(amount);
-    if (!(amt > 0)) { setFormError("Masukkan jumlah yang valid."); return; }
+    if (!(amt > 0 && amt <= 1_000_000_000_000)) { setFormError("Masukkan jumlah lebih dari 0 dan maksimal Rp1.000.000.000.000."); return; }
+    if (!isValidDateString(date)) { setFormError("Tanggal transaksi tidak valid atau tidak boleh di masa depan."); return; }
     const err = checkBalance(amt, subId);
     if (err) { setFormError(err); return; }
     setFormError("");
@@ -1678,7 +1800,8 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   };
   const submitTarik = () => {
     const amt = Number(amount);
-    if (!(amt > 0)) { setFormError("Masukkan jumlah yang valid."); return; }
+    if (!(amt > 0 && amt <= 1_000_000_000_000)) { setFormError("Masukkan jumlah lebih dari 0 dan maksimal Rp1.000.000.000.000."); return; }
+    if (!isValidDateString(date)) { setFormError("Tanggal transaksi tidak valid atau tidak boleh di masa depan."); return; }
     const cap = subId ? assetBalance(transactions, cat.id, subId, user) : catSaldo;
     if (amt > cap) { setFormError(`Saldo tidak mencukupi. Saldo tersedia saat ini ${rupiah(cap)}.`); return; }
     setFormError("");
@@ -1835,7 +1958,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
                 {cat.subs.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             )}
-            <input className="transaction-date-input" style={{ maxWidth: 160 }} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <input className="transaction-date-input" style={{ maxWidth: 160 }} type="date" max={todayStr()} value={date} onChange={(e) => setDate(e.target.value)} />
             <input
               style={{ flex: 1, minWidth: 160 }}
               placeholder="Catatan (opsional)"
@@ -1953,6 +2076,8 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
         <EditTransactionModal
           tx={editingTx}
           cat={cat}
+          user={user}
+          transactions={transactions}
           onClose={() => setEditingTx(null)}
           onSave={(updated) => { onUpdateTx(updated); setEditingTx(null); }}
         />
@@ -1980,6 +2105,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
   const [carryoverSubId, setCarryoverSubId] = useState("");
   const [editingSalaryAllocation, setEditingSalaryAllocation] = useState(false);
   const [salaryError, setSalaryError] = useState("");
+  const [formError, setFormError] = useState("");
   const [salaryBusy, setSalaryBusy] = useState(false);
 
   const assetCategories = user.categories.filter((c) => c.isAsset);
@@ -2000,6 +2126,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
   const chooseTarget = (nextTarget) => {
     setTarget(nextTarget);
     setSubId("");
+    setFormError("");
     if (nextTarget === "asset" || nextTarget === "asset_opening") {
       setCategoryId(assetCategories[0]?.id || "");
     } else if (nextTarget === "global") {
@@ -2014,8 +2141,8 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
   const submit = async () => {
     if (target === "salary") {
       const salary = Number(salaryAmount);
-      if (!(salary > 0)) { setSalaryError("Nominal gaji harus lebih dari 0."); return; }
-      if (!salaryDate || salaryDate > todayStr()) { setSalaryError("Tanggal gaji tidak boleh di masa depan."); return; }
+      if (!(salary > 0 && salary <= 1_000_000_000_000)) { setSalaryError("Nominal gaji harus lebih dari 0 dan maksimal Rp1.000.000.000.000."); return; }
+      if (!isValidDateString(salaryDate)) { setSalaryError("Tanggal gaji tidak valid atau tidak boleh di masa depan."); return; }
       setSalaryBusy(true);
       setSalaryError("");
       try {
@@ -2033,9 +2160,17 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
       return;
     }
     const amt = Number(amount);
-    if (!(amt > 0)) return;
-    if ((target === "sub" || target === "asset" || target === "asset_opening") && !categoryId) return;
-    if (target === "sub" && !subId) return;
+    if (!(amt > 0 && amt <= 1_000_000_000_000)) { setFormError("Nominal harus lebih dari 0 dan maksimal Rp1.000.000.000.000."); return; }
+    if (!isValidDateString(date)) { setFormError("Tanggal tidak valid atau tidak boleh di masa depan."); return; }
+    if ((target === "sub" || target === "asset" || target === "asset_opening") && !categoryId) {
+      setFormError("Pilih kategori tujuan terlebih dahulu.");
+      return;
+    }
+    if (target === "sub" && !subId) {
+      setFormError("Pilih sub-alokasi terlebih dahulu.");
+      return;
+    }
+    setFormError("");
     onSubmit({
       id: uid(),
       type: target === "asset" || target === "asset_opening" ? "asset_opening" : "topup",
@@ -2163,14 +2298,15 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
           )}
 
           <Field label="Nominal">
-            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="cth. 500000" />
+            <input type="number" value={amount} onChange={(e) => { setAmount(e.target.value); setFormError(""); }} placeholder="cth. 500000" />
           </Field>
           <Field label="Tanggal">
-            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <input type="date" max={todayStr()} value={date} onChange={(e) => { setDate(e.target.value); setFormError(""); }} />
           </Field>
           <Field label="Catatan (opsional)">
             <input value={note} onChange={(e) => setNote(e.target.value)} onKeyDown={onEnter(submit)} placeholder="cth. Bonus kerja" />
           </Field>
+          {formError && <div className="flex items-center gap-2 text-sm" style={{ color: "var(--rose)" }}><AlertCircle size={14} /> {formError}</div>}
 
           <button
             className="btn-primary flex items-center justify-center gap-2 mt-1"
@@ -2227,7 +2363,8 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
   const effectiveIncome = selectedIncome + globalTopup;
   const totalSpent = expenses.reduce((s, t) => s + Number(t.amount), 0);
   const cashIncome = selectedIncome + totalTopup;
-  const thisMonthNet = cashIncome - totalSpent;
+  const periodWithdrawals = monthT.filter(isWithdrawTx).reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+  const thisMonthNet = cashIncome + periodWithdrawals - totalSpent;
   const selectedEnd = getPeriodEnd(selectedPeriod, periods) || todayStr();
   const balance = cumulativeBalanceUpTo(user, transactions, selectedEnd);
   const prevCarry = balance - thisMonthNet;
@@ -2447,6 +2584,8 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
         <EditTransactionModal
           tx={editingTx}
           cat={historyCategories.find((c) => c.id === editingTx.categoryId) || user.categories.find((c) => c.id === editingTx.categoryId) || null}
+          user={user}
+          transactions={transactions}
           onClose={() => setEditingTx(null)}
           onSave={(updated) => { onUpdateTx(updated); setEditingTx(null); }}
         />
@@ -2456,59 +2595,63 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
 }
 
 /* ---------- Forgot password modal ---------- */
-function ForgotPasswordModal({ onClose }) {
-  const [step, setStep] = useState("email"); // email | question | reset | done
+function ForgotPasswordModal({ onClose, recoveryMode = false }) {
+  const [step, setStep] = useState(recoveryMode ? "reset" : "email");
   const [email, setEmail] = useState("");
-  const [username, setUsername] = useState("");
-  const [account, setAccount] = useState(null);
-  const [answer, setAnswer] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const closeModal = async () => {
+    const closeError = await onClose();
+    if (closeError) setError(closeError);
+  };
+
   const checkEmail = async () => {
     if (!email.trim()) return;
     setBusy(true); setError("");
-    const { error: resetError } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-      redirectTo: window.location.origin,
-    });
-    setBusy(false);
-    if (resetError) { setError(resetError.message); return; }
-    setStep("done");
-  };
-
-  const verifyAnswer = () => {
-    if (!answer.trim()) return;
-    if (answer.trim().toLowerCase() !== (account.securityAnswer || "").trim().toLowerCase()) {
-      setError("Jawaban belum tepat, coba lagi.");
-      return;
+    try {
+      const { error: resetError } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+        redirectTo: authCallbackUrl,
+      });
+      if (resetError) throw resetError;
+      setStep("done");
+    } catch (resetError) {
+      setError(resetError.message || "Email reset password gagal dikirim.");
+    } finally {
+      setBusy(false);
     }
-    setError("");
-    setStep("reset");
   };
 
   const resetPassword = async () => {
-    if (newPassword.length < 4) { setError("Password minimal 4 karakter."); return; }
+    if (newPassword.length < 8) { setError("Password minimal 8 karakter."); return; }
     if (newPassword !== confirmPassword) { setError("Konfirmasi password tidak sama."); return; }
     setBusy(true); setError("");
-    const { error: resetError } = await supabase.auth.updateUser({ password: newPassword });
-    if (resetError) { setBusy(false); setError(resetError.message); return; }
-    setBusy(false);
-    setStep("done");
+    try {
+      const { error: resetError } = await supabase.auth.updateUser({ password: newPassword });
+      if (resetError) throw resetError;
+      setStep("done");
+    } catch (resetError) {
+      setError(resetError.message || "Password gagal diperbarui.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
-    <div className="modal-overlay anim-fade" onClick={onClose}>
+    <div className="modal-overlay anim-fade" onClick={closeModal}>
       <div className="card p-6 anim-pop" style={{ maxWidth: 420, width: "100%" }} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-1">
-          <h2 className="display" style={{ fontSize: 18, fontWeight: 700 }}>Lupa Password</h2>
-          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+          <h2 className="display" style={{ fontSize: 18, fontWeight: 700 }}>
+            {recoveryMode ? "Buat Password Baru" : "Lupa Password"}
+          </h2>
+          <button className="icon-btn" onClick={closeModal}><X size={18} /></button>
         </div>
 
         {step === "email" && (
           <>
-            <p className="muted text-sm mb-4">Masukkan email akunmu, kita cek dulu apakah akunnya ada.</p>
+            <p className="muted text-sm mb-4">Masukkan email akunmu. Jika terdaftar, tautan reset akan dikirim melalui email.</p>
             <div className="flex flex-col gap-4">
               <Field label="Email">
                 <input
@@ -2521,43 +2664,25 @@ function ForgotPasswordModal({ onClose }) {
               </Field>
               {error && <div className="flex items-center gap-2 text-sm" style={{ color: "var(--rose)" }}><AlertCircle size={14} /> {error}</div>}
               <button className="btn-primary flex items-center justify-center gap-2" onClick={checkEmail} disabled={busy || !email.trim()}>
-                Lanjut <ArrowRight size={16} />
+                {busy ? "Mengirim..." : "Kirim Tautan Reset"} <ArrowRight size={16} />
               </button>
-            </div>
-          </>
-        )}
-
-        {step === "question" && account && (
-          <>
-            <p className="muted text-sm mb-4">Jawab pertanyaan keamanan akun <b style={{ color: "var(--text)" }}>{username}</b> ini.</p>
-            <div className="flex flex-col gap-4">
-              <Field label={account.securityQuestion}>
-                <input
-                  value={answer}
-                  onChange={(e) => setAnswer(e.target.value)}
-                  onKeyDown={onEnter(verifyAnswer)}
-                  placeholder="Jawabanmu"
-                />
-              </Field>
-              {error && <div className="flex items-center gap-2 text-sm" style={{ color: "var(--rose)" }}><AlertCircle size={14} /> {error}</div>}
-              <div className="flex gap-2">
-                <button className="btn-ghost flex items-center gap-2" onClick={() => setStep("email")}><ArrowLeft size={15} /> Kembali</button>
-                <button className="btn-primary flex-1 flex items-center justify-center gap-2" onClick={verifyAnswer} disabled={!answer.trim()}>
-                  Verifikasi <Check size={16} />
-                </button>
-              </div>
             </div>
           </>
         )}
 
         {step === "reset" && (
           <>
-            <p className="muted text-sm mb-4">Jawaban benar. Buat password baru untuk akunmu.</p>
+            <p className="muted text-sm mb-4">Masukkan password baru untuk akunmu.</p>
             <div className="flex flex-col gap-4">
-              <Field label="Password Baru">
-                <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="••••••••" />
+              <Field label="Password baru (minimal 8 karakter)">
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="••••••••"
+                />
               </Field>
-              <Field label="Konfirmasi Password Baru">
+              <Field label="Konfirmasi password baru">
                 <input
                   type="password"
                   value={confirmPassword}
@@ -2568,7 +2693,7 @@ function ForgotPasswordModal({ onClose }) {
               </Field>
               {error && <div className="flex items-center gap-2 text-sm" style={{ color: "var(--rose)" }}><AlertCircle size={14} /> {error}</div>}
               <button className="btn-primary flex items-center justify-center gap-2" onClick={resetPassword} disabled={busy}>
-                Simpan Password Baru <Check size={16} />
+                {busy ? "Menyimpan..." : "Simpan Password Baru"} <Check size={16} />
               </button>
             </div>
           </>
@@ -2577,9 +2702,12 @@ function ForgotPasswordModal({ onClose }) {
         {step === "done" && (
           <>
             <div className="check-badge anim-pop-delay" style={{ marginTop: 8 }}><Check size={26} color="#101815" /></div>
-            <p className="text-center mt-4" style={{ fontWeight: 600 }}>Email reset password terkirim!</p>
-            <p className="muted text-sm text-center mt-1">Buka tautan di email untuk membuat password baru.</p>
-            <button className="btn-primary w-full mt-6 flex items-center justify-center gap-2" onClick={onClose}>
+            <p className="text-center mt-4" style={{ fontWeight: 600 }}>
+              {recoveryMode ? "Password berhasil diperbarui." : "Jika email terdaftar, tautan reset password akan segera dikirim."}
+            </p>
+            {error && <div className="flex items-center gap-2 text-sm mt-3" role="alert" style={{ color: "var(--rose)" }}><AlertCircle size={14} /> {error}</div>}
+            {!recoveryMode && <p className="muted text-sm text-center mt-1">Periksa kotak masuk dan folder spam.</p>}
+            <button className="btn-primary w-full mt-6 flex items-center justify-center gap-2" onClick={closeModal}>
               Kembali ke Masuk <ArrowRight size={16} />
             </button>
           </>
@@ -2715,8 +2843,10 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
   const [importOk, setImportOk] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
   const [migrationError, setMigrationError] = useState("");
   const [migrationOk, setMigrationOk] = useState(false);
+  const [migrationBusy, setMigrationBusy] = useState(false);
   const [feedbackType, setFeedbackType] = useState("bug");
   const [feedbackDescription, setFeedbackDescription] = useState("");
   const [feedbackFile, setFeedbackFile] = useState(null);
@@ -2755,55 +2885,48 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
     triggerDownload(`pundi-transaksi-${user.username}-${todayStr()}.csv`, transactionsToCsv(user, transactions), "text/csv");
   };
 
-  const doImport = () => {
+  const doImport = async () => {
     setImportError(""); setImportOk(false);
+    setImportBusy(true);
     try {
       const parsed = JSON.parse(importText);
-      if (!parsed.user || !Array.isArray(parsed.transactions)) throw new Error("format");
-      const u = parsed.user;
-      if (!Array.isArray(u.categories)) throw new Error("format");
-      onImport(
-        {
-          name: u.name || "", age: u.age || null, income: u.income || null,
-          monthlyIncomes: (u.monthlyIncomes && typeof u.monthlyIncomes === "object")
-            ? u.monthlyIncomes
-            : (u.income ? { [nowMonthKey()]: u.income } : {}),
-          salaryPeriods: Array.isArray(u.salaryPeriods) ? u.salaryPeriods : [],
-          payDay: Math.max(1, Math.min(31, Number(u.payDay) || 1)),
-          assetArchive: Array.isArray(u.assetArchive) ? u.assetArchive : [],
-          strategyMode: u.strategyMode || "custom", categories: u.categories,
-          recurring: Array.isArray(u.recurring) ? u.recurring : [],
-          goals: Array.isArray(u.goals) ? u.goals : [],
-          confirmed: true, stage: "dashboard",
-        },
-        parsed.transactions
-      );
+      const backup = validateBackup(parsed);
+      await onImport(backup.user, backup.transactions);
       setImportOk(true);
       setImportText("");
-    } catch (e) {
-      setImportError("File/teks JSON tidak valid atau formatnya bukan hasil export Pundi.");
+    } catch (error) {
+      setImportError(error.message || "Impor gagal. Periksa format backup dan koneksi, lalu coba lagi.");
+    } finally {
+      setImportBusy(false);
     }
   };
-  const migrateLocal = () => {
+  const migrateLocal = async () => {
     setMigrationError(""); setMigrationOk(false);
+    setMigrationBusy(true);
     try {
       const prefix = "pundi:shared:";
       const localUser = JSON.parse(window.localStorage.getItem(`${prefix}mmp_user_${user.username}`) || "null");
       const localTx = JSON.parse(window.localStorage.getItem(`${prefix}mmp_tx_${user.username}`) || "[]");
       if (!localUser || !Array.isArray(localTx)) throw new Error("missing");
-      onMigrateLocal({
-        name: localUser.name || "", age: localUser.age || null, income: localUser.income || null,
-        monthlyIncomes: localUser.monthlyIncomes || {},
-        salaryPeriods: Array.isArray(localUser.salaryPeriods) ? localUser.salaryPeriods : [],
-        payDay: Math.max(1, Math.min(31, Number(localUser.payDay) || 1)),
-        assetArchive: Array.isArray(localUser.assetArchive) ? localUser.assetArchive : [],
-        strategyMode: localUser.strategyMode || null, categories: localUser.categories || [],
-        recurring: localUser.recurring || [], goals: localUser.goals || [],
-        confirmed: !!localUser.confirmed, stage: localUser.stage || "dashboard",
-      }, localTx);
+      const backup = validateBackup({
+        user: {
+          ...localUser,
+          categories: localUser.categories || [],
+          monthlyIncomes: localUser.monthlyIncomes || {},
+          salaryPeriods: Array.isArray(localUser.salaryPeriods) ? localUser.salaryPeriods : [],
+          payDay: localUser.payDay || 1,
+          assetArchive: Array.isArray(localUser.assetArchive) ? localUser.assetArchive : [],
+          recurring: localUser.recurring || [],
+          goals: localUser.goals || [],
+        },
+        transactions: localTx,
+      });
+      await onMigrateLocal(backup.user, backup.transactions);
       setMigrationOk(true);
     } catch (error) {
-      setMigrationError("Data lokal untuk username ini tidak ditemukan di browser ini.");
+      setMigrationError(error.message || "Migrasi gagal. Periksa data lokal dan koneksi, lalu coba lagi.");
+    } finally {
+      setMigrationBusy(false);
     }
   };
 
@@ -2904,8 +3027,8 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
               Memindahkan akun dan transaksi lokal dengan username <b>{user.username}</b> ke Supabase.
               Jalankan hanya jika data Supabase masih kosong.
             </p>
-            <button className="btn-ghost flex items-center gap-2 mt-3" onClick={migrateLocal}>
-              <Upload size={15} /> Migrasikan Data Lokal
+            <button className="btn-ghost flex items-center gap-2 mt-3" onClick={migrateLocal} disabled={migrationBusy}>
+              <Upload size={15} /> {migrationBusy ? "Memigrasikan..." : "Migrasikan Data Lokal"}
             </button>
             {migrationError && <p className="text-sm mt-2" style={{ color: "var(--rose)" }}>{migrationError}</p>}
             {migrationOk && <p className="text-sm mt-2" style={{ color: "var(--teal)" }}>Data lokal berhasil dimigrasikan.</p>}
@@ -2994,8 +3117,8 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
           />
           {importError && <p className="text-sm mt-2" style={{ color: "var(--rose)" }}>{importError}</p>}
           {importOk && <p className="text-sm mt-2" style={{ color: "var(--teal)" }}>Data berhasil diimpor.</p>}
-          <button className="btn-ghost flex items-center gap-2 mt-3" onClick={doImport} disabled={!importText.trim()}>
-            <Upload size={15} /> Impor Sekarang
+          <button className="btn-ghost flex items-center gap-2 mt-3" onClick={doImport} disabled={!importText.trim() || importBusy}>
+            <Upload size={15} /> {importBusy ? "Mengimpor..." : "Impor Sekarang"}
           </button>
         </div>
 
@@ -3329,12 +3452,12 @@ function GoalsPage({ user, onBack, onUpdateGoals, onLogout, onAddTx, transaction
   const [selectedCatId, setSelectedCatId] = useState("");
   const [selectedSubId, setSelectedSubId] = useState("");
   const [contrib, setContrib] = useState({});
-
-  const selectedCat = user.categories.find((c) => c.id === selectedCatId);
-  const selectedSub = selectedCat ? selectedCat.subs.find((s) => s.id === selectedSubId) : null;
+  const [goalErrors, setGoalErrors] = useState({});
+  const selectedCat = user.categories.find((category) => category.id === selectedCatId);
 
   const addGoal = () => {
     if (!name.trim() || !(Number(target) > 0) || !selectedCatId || !selectedSubId) return;
+    if (name.trim().length > 80 || Number(target) > 1_000_000_000_000) return;
     onUpdateGoals([...goals, {
       id: uid(),
       name: name.trim(),
@@ -3348,22 +3471,90 @@ function GoalsPage({ user, onBack, onUpdateGoals, onLogout, onAddTx, transaction
   const removeGoal = (id) => onUpdateGoals(goals.filter((g) => g.id !== id));
 
   const getGoalSaved = (goalId) => {
-    const goal = goals.find((g) => g.id === goalId);
-    if (!goal) return 0;
-    return (transactions || []).filter((t) => t.goalId === goalId && t.type === "expense").reduce((s, t) => s + Number(t.amount), 0);
+    return (transactions || [])
+      .filter((transaction) => transaction.goalId === goalId)
+      .reduce((sum, transaction) => {
+        if (isExpenseTx(transaction)) return sum + Number(transaction.amount || 0);
+        if (isWithdrawTx(transaction) || isTopupTx(transaction)) return sum - Number(transaction.amount || 0);
+        return sum;
+      }, 0);
   };
 
   const contribute = (id, sign) => {
     const goal = goals.find((g) => g.id === id);
     const amt = Number(contrib[id]);
-    if (!(amt > 0) || !goal) return;
+    if (!(amt > 0 && amt <= 1_000_000_000_000) || !goal) return;
+    const category = user.categories.find((item) => item.id === goal.categoryId);
+    const goalSub = category?.subs.find((sub) => sub.id === goal.subId);
+    if (!category || !goalSub) {
+      setGoalErrors({ ...goalErrors, [id]: "Kategori tujuan sudah tidak tersedia. Edit alokasi atau buat tujuan baru." });
+      return;
+    }
     
     if (sign > 0) {
-      // Contribute to goal
+      const period = getActivePeriod(user);
+      const periods = getSalaryPeriods(user);
+      const periodTransactions = transactionsForPeriod(transactions || [], period, periods);
+      const globalTopup = periodTransactions
+        .filter((transaction) => isTopupTx(transaction) && !transaction.categoryId)
+        .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+      const allocatedIncome = Number(period.amount || 0) + globalTopup;
+      const categoryTopups = periodTransactions
+        .filter((transaction) => isTopupTx(transaction) && transaction.categoryId === category.id && !transaction.subId)
+        .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+      const subTopups = periodTransactions
+        .filter((transaction) => isTopupTx(transaction) && transaction.categoryId === category.id && transaction.subId === goal.subId)
+        .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+      const categorySpent = periodTransactions
+        .filter((transaction) => transaction.categoryId === category.id && (category.isAsset ? isAssetMonthlyDepositTx(transaction) : isExpenseTx(transaction)))
+        .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0)
+        - (category.isAsset
+          ? periodTransactions.filter((transaction) => transaction.categoryId === category.id && isWithdrawTx(transaction))
+              .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0)
+          : 0);
+      const subSpent = periodTransactions
+        .filter((transaction) => transaction.categoryId === category.id && transaction.subId === goal.subId && (category.isAsset ? isAssetMonthlyDepositTx(transaction) : isExpenseTx(transaction)) && (category.isAsset || !transaction.directAsset))
+        .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0)
+        - (category.isAsset
+          ? periodTransactions.filter((transaction) => transaction.categoryId === category.id && transaction.subId === goal.subId && isWithdrawTx(transaction))
+              .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0)
+          : 0);
+      const categoryRemaining = allocatedIncome * category.percent / 100
+        + categoryTopups
+        + periodCarryoverAmount(period, category.id)
+        - categorySpent;
+      const subRemaining = allocatedIncome * category.percent / 100 * goalSub.percent / 100
+        + subTopups
+        + periodCarryoverAmount(period, category.id, goal.subId)
+        - subSpent;
+      if (amt > Math.min(categoryRemaining, subRemaining)) {
+        setGoalErrors({ ...goalErrors, [id]: `Sisa alokasi tujuan hanya ${rupiah(Math.max(0, Math.min(categoryRemaining, subRemaining)))}.` });
+        return;
+      }
+      setGoalErrors({ ...goalErrors, [id]: "" });
       onAddTx({ id: uid(), type: "expense", categoryId: goal.categoryId, subId: goal.subId, amount: amt, note: `Nabung untuk: ${goal.name}`, date: todayStr(), goalId: id });
     } else {
-      // Remove from goal - create a negative contribution or reverse transaction
-      onAddTx({ id: uid(), type: "withdraw", categoryId: goal.categoryId, subId: goal.subId, amount: amt, note: `Ambil dari: ${goal.name}`, date: todayStr(), goalId: id });
+      const saved = getGoalSaved(id);
+      if (amt > saved) {
+        setGoalErrors({ ...goalErrors, [id]: `Saldo tujuan hanya ${rupiah(Math.max(0, saved))}.` });
+        return;
+      }
+      const isAssetGoal = !!category.isAsset;
+      if (isAssetGoal && amt > assetBalance(transactions || [], category.id, goal.subId, user)) {
+        setGoalErrors({ ...goalErrors, [id]: "Saldo aset yang tersedia tidak mencukupi." });
+        return;
+      }
+      setGoalErrors({ ...goalErrors, [id]: "" });
+      onAddTx({
+        id: uid(),
+        type: isAssetGoal ? "withdraw" : "topup",
+        categoryId: goal.categoryId,
+        subId: goal.subId,
+        amount: amt,
+        note: `Ambil dari: ${goal.name}`,
+        date: todayStr(),
+        goalId: id,
+      });
     }
     setContrib({ ...contrib, [id]: "" });
   };
@@ -3387,7 +3578,7 @@ function GoalsPage({ user, onBack, onUpdateGoals, onLogout, onAddTx, transaction
             const cat = user.categories.find((c) => c.id === g.categoryId);
             const sub = cat ? cat.subs.find((s) => s.id === g.subId) : null;
             const saved = getGoalSaved(g.id);
-            const pct = g.target > 0 ? (saved / g.target) * 100 : 0;
+            const pct = g.target > 0 ? Math.max(0, (saved / g.target) * 100) : 0;
             const done = saved >= g.target;
             return (
               <div key={g.id} className="card p-5 anim-fade-up">
@@ -3404,12 +3595,13 @@ function GoalsPage({ user, onBack, onUpdateGoals, onLogout, onAddTx, transaction
                   <span className="muted">dari {rupiah(g.target)} ({fmtPercent(pct)}%)</span>
                 </div>
                 {done && <p className="text-xs mt-1" style={{ color: "var(--teal)" }}>🎉 Target tercapai!</p>}
+                {goalErrors[g.id] && <p className="text-sm mt-2" role="alert" style={{ color: "var(--rose)" }}>{goalErrors[g.id]}</p>}
                 <div className="flex gap-2 mt-3">
                   <input
                     type="number"
                     placeholder="Nominal"
                     value={contrib[g.id] || ""}
-                    onChange={(e) => setContrib({ ...contrib, [g.id]: e.target.value })}
+                    onChange={(e) => { setContrib({ ...contrib, [g.id]: e.target.value }); setGoalErrors({ ...goalErrors, [g.id]: "" }); }}
                     onKeyDown={onEnter(() => contribute(g.id, 1))}
                   />
                   <button className="btn-ghost flex items-center gap-1" onClick={() => contribute(g.id, 1)}><Plus size={14} /> Nabung</button>
@@ -3445,7 +3637,7 @@ function GoalsPage({ user, onBack, onUpdateGoals, onLogout, onAddTx, transaction
 }
 
 /* ---------- Edit transaction modal ---------- */
-function EditTransactionModal({ tx, cat, onClose, onSave }) {
+function EditTransactionModal({ tx, cat, user, transactions, onClose, onSave }) {
   const [amount, setAmount] = useState(String(tx.amount));
   const [subId, setSubId] = useState(tx.subId || "");
   const [note, setNote] = useState(tx.note || "");
@@ -3458,7 +3650,30 @@ function EditTransactionModal({ tx, cat, onClose, onSave }) {
 
   const submit = () => {
     const amt = Number(amount);
-    if (!(amt > 0)) { setError("Jumlah harus lebih dari 0."); return; }
+    if (!(amt > 0 && amt <= 1_000_000_000_000)) { setError("Jumlah harus lebih dari 0 dan maksimal Rp1.000.000.000.000."); return; }
+    if (!isValidDateString(date)) { setError("Tanggal tidak valid atau tidak boleh di masa depan."); return; }
+    if (withdraw) {
+      const otherTransactions = transactions.filter((transaction) => transaction.id !== tx.id);
+      const available = assetBalance(otherTransactions, cat?.id, subId || undefined, user);
+      if (amt > available) {
+        setError(`Saldo aset tidak mencukupi. Saldo tersedia ${rupiah(Math.max(0, available))}.`);
+        return;
+      }
+    }
+    if (tx.goalId && (withdraw || topup)) {
+      const savedWithoutWithdrawal = transactions
+        .filter((transaction) => transaction.goalId === tx.goalId && transaction.id !== tx.id)
+        .reduce((sum, transaction) => {
+          if (isExpenseTx(transaction)) return sum + Number(transaction.amount || 0);
+          if (isWithdrawTx(transaction) || isTopupTx(transaction)) return sum - Number(transaction.amount || 0);
+          return sum;
+        }, 0);
+      if (amt > savedWithoutWithdrawal) {
+        setError(`Saldo tujuan tidak mencukupi. Saldo tersedia ${rupiah(Math.max(0, savedWithoutWithdrawal))}.`);
+        return;
+      }
+    }
+    setError("");
     onSave({ ...tx, amount: amt, subId: subId || null, note: note.trim(), date });
   };
 
@@ -3482,7 +3697,7 @@ function EditTransactionModal({ tx, cat, onClose, onSave }) {
             </Field>
           )}
           <Field label="Tanggal">
-            <input className="transaction-date-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <input className="transaction-date-input" type="date" max={todayStr()} value={date} onChange={(e) => setDate(e.target.value)} />
           </Field>
           <Field label="Catatan">
             <input value={note} onChange={(e) => setNote(e.target.value)} onKeyDown={onEnter(submit)} />
@@ -3759,6 +3974,7 @@ export default function App() {
   const [pendingUser, setPendingUser] = useState(null); // holds new account while welcome modal shows
   const [showAddMoney, setShowAddMoney] = useState(false);
   const [showForgotPassword, setShowForgotPassword] = useState(false);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
   const [showResetAccount, setShowResetAccount] = useState(false);
   const [showDeleteAccount, setShowDeleteAccount] = useState(false);
   const [theme, setTheme] = useState("dark");
@@ -3767,14 +3983,22 @@ export default function App() {
   const txSaveQueueRef = useRef(Promise.resolve());
   const profileSaveQueueRef = useRef(Promise.resolve());
   const accountLoadRef = useRef(null);
+  const passwordRecoveryRef = useRef(false);
 
   useEffect(() => {
+    const recoveryLink = window.location.hash.includes("type=recovery")
+      || new URLSearchParams(window.location.search).get("type") === "recovery";
+    if (recoveryLink) {
+      passwordRecoveryRef.current = true;
+      setPasswordRecovery(true);
+    }
+
     (async () => {
       const savedTheme = await readKey(THEME_KEY, false);
       if (savedTheme === "light" || savedTheme === "dark") setTheme(savedTheme);
 
       const { data: { session } } = await supabase.auth.getSession();
-      if (session) await loadAccount(session.user.id);
+      if (session && !recoveryLink && !passwordRecoveryRef.current) await loadAccount(session.user.id);
       setSessionChecked(true);
     })().catch((error) => {
       console.error("Supabase session load failed", error);
@@ -3783,7 +4007,14 @@ export default function App() {
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (event === "SIGNED_IN" && session && !user) {
+      if (event === "PASSWORD_RECOVERY") {
+        passwordRecoveryRef.current = true;
+        accountLoadRef.current = null;
+        setUser(null);
+        setTransactions([]);
+        setAccountLoaded(false);
+        setPasswordRecovery(true);
+      } else if (event === "SIGNED_IN" && session && !user && !recoveryLink && !passwordRecoveryRef.current) {
         try {
           await loadAccount(session.user.id);
         } catch (error) {
@@ -3812,6 +4043,7 @@ export default function App() {
     if (profileError) throw profileError;
     if (txError) throw txError;
     if (!profile || profile.id !== userId) throw new Error("Profil akun tidak ditemukan.");
+    if (passwordRecoveryRef.current) return;
     const storedMonthlyIncomes = profile.monthly_incomes || {};
     const hasSavedSalaryPeriods = Object.prototype.hasOwnProperty.call(storedMonthlyIncomes, "__pundi_salary_periods");
     const hasSavedPayDay = Object.prototype.hasOwnProperty.call(storedMonthlyIncomes, "__pundi_pay_day");
@@ -3828,14 +4060,13 @@ export default function App() {
       assetArchive: Array.isArray(storedMonthlyIncomes.__pundi_asset_archive) ? storedMonthlyIncomes.__pundi_asset_archive : [],
       strategyMode: profile.strategy_mode,
       passwordHash: undefined,
-      securityQuestion: profile.security_question,
-      securityAnswer: profile.security_answer,
     });
-    setTransactions((tx || []).map(({ user_id, category_id, sub_id, direct_asset, ...item }) => ({
+    setTransactions((tx || []).map(({ user_id, category_id, sub_id, direct_asset, goal_id, ...item }) => ({
       ...item,
       categoryId: category_id,
       subId: sub_id,
       directAsset: !!direct_asset,
+      goalId: goal_id || undefined,
       amount: Number(item.amount),
     })));
     setAccountLoaded(true);
@@ -3871,8 +4102,6 @@ export default function App() {
     goals: u.goals || [],
     confirmed: !!u.confirmed,
     stage: u.stage || "onboarding",
-    security_question: u.securityQuestion || null,
-    security_answer: u.securityAnswer || null,
   });
 
   const persistUser = async (u) => {
@@ -3892,14 +4121,15 @@ export default function App() {
 
   const transactionRow = (userId, item) => ({
     id: item.id,
-      user_id: userId,
-      date: item.date,
-      type: item.type || "expense",
-      category_id: item.categoryId || null,
-      sub_id: item.subId || null,
-      direct_asset: !!item.directAsset,
-      note: item.note || null,
-      amount: Number(item.amount),
+    user_id: userId,
+    date: item.date,
+    type: item.type || "expense",
+    category_id: item.categoryId || null,
+    sub_id: item.subId || null,
+    direct_asset: !!item.directAsset,
+    note: item.note || null,
+    amount: Number(item.amount),
+    goal_id: item.goalId || null,
   });
 
   const enqueueTransactionSave = (userId, operation) => {
@@ -3920,13 +4150,12 @@ export default function App() {
     });
   };
 
-  const replaceTransactions = (userId, tx) => enqueueTransactionSave(userId, async () => {
-    const { error: deleteError } = await supabase.from("transactions").delete().eq("user_id", userId);
-    if (deleteError) return { error: deleteError };
-    const rows = tx.map((item) => transactionRow(userId, item));
-    if (!rows.length) return { error: null };
-    return supabase.from("transactions").insert(rows);
-  });
+  const replaceFinancialData = (userId, financialUser, tx) => enqueueTransactionSave(userId, () =>
+    supabase.rpc("replace_my_financial_data", {
+      p_profile: profilePayload(financialUser),
+      p_transactions: tx.map((item) => transactionRow(userId, item)),
+    })
+  );
 
   const updateUser = (patch) => {
     setUser((prev) => {
@@ -3950,14 +4179,14 @@ export default function App() {
     }
   };
 
-  const handleRegister = async (username, email, password, securityQuestion, securityAnswer) => {
+  const handleRegister = async (username, email, password) => {
     setBusy(true); setAuthError("");
     const { data: authData, error } = await supabase.auth.signUp({
       email: email.trim(),
       password,
       options: {
         emailRedirectTo: authCallbackUrl,
-        data: { username, securityQuestion, securityAnswer },
+        data: { username },
       },
     });
     if (error) { setBusy(false); setAuthError(error.message); return; }
@@ -3968,7 +4197,6 @@ export default function App() {
     }
     const newUser = {
       id: authData.user.id, username, email: email.trim(),
-      securityQuestion, securityAnswer,
       name: "", age: null, income: null,
       monthlyIncomes: {},
       salaryPeriods: [], payDay: 1,
@@ -4037,8 +4265,7 @@ export default function App() {
       stage: "onboarding",
     };
     try {
-      await persistUser(resetUser);
-      await replaceTransactions(user.id, []);
+      await replaceFinancialData(user.id, resetUser, []);
     } catch (error) {
       return;
     }
@@ -4240,7 +4467,27 @@ export default function App() {
             onContinue={() => { setUser(pendingUser); setPendingUser(null); }}
           />
         )}
-        {showForgotPassword && <ForgotPasswordModal onClose={() => setShowForgotPassword(false)} />}
+        {(showForgotPassword || passwordRecovery) && (
+          <ForgotPasswordModal
+            key={passwordRecovery ? "password-recovery" : "password-request"}
+            recoveryMode={passwordRecovery}
+            onClose={async () => {
+              if (passwordRecovery) {
+                const { error } = await supabase.auth.signOut();
+                if (error) {
+                  console.error("Password recovery sign-out failed", error);
+                  return "Kata sandi sudah diperbarui, tetapi sesi belum dapat ditutup. Silakan muat ulang halaman.";
+                }
+                passwordRecoveryRef.current = false;
+                setPasswordRecovery(false);
+                setAuthError("");
+                window.history.replaceState(null, "", window.location.pathname);
+              } else {
+                setShowForgotPassword(false);
+              }
+            }}
+          />
+        )}
         <AppFooter />
       </div>
     );
@@ -4334,15 +4581,17 @@ export default function App() {
           theme={theme}
           onToggleTheme={toggleTheme}
           onUpdateProfile={(patch) => updateUser(patch)}
-          onImport={(userPatch, tx) => {
-            updateUser(userPatch);
+          onImport={async (userPatch, tx) => {
+            const nextUser = { ...user, ...userPatch };
+            await replaceFinancialData(user.id, nextUser, tx);
+            setUser(nextUser);
             setTransactions(tx);
-            void replaceTransactions(user.id, tx);
           }}
-          onMigrateLocal={(userPatch, tx) => {
-            updateUser(userPatch);
+          onMigrateLocal={async (userPatch, tx) => {
+            const nextUser = { ...user, ...userPatch };
+            await replaceFinancialData(user.id, nextUser, tx);
+            setUser(nextUser);
             setTransactions(tx);
-            void replaceTransactions(user.id, tx);
           }}
           onBack={() => setPage("dashboard")}
           onOpenReset={() => setShowResetAccount(true)}

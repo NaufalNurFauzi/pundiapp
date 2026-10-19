@@ -15,8 +15,6 @@ create table if not exists public.profiles (
   goals jsonb not null default '[]'::jsonb,
   confirmed boolean not null default false,
   stage text not null default 'onboarding',
-  security_question text,
-  security_answer text,
   created_at timestamptz not null default now()
 );
 
@@ -30,6 +28,7 @@ create table if not exists public.transactions (
   note text,
   amount numeric not null check (amount >= 0),
   direct_asset boolean not null default false,
+  goal_id text,
   created_at timestamptz not null default now()
 );
 
@@ -44,13 +43,11 @@ language plpgsql
 security definer set search_path = public
 as $$
 begin
-  insert into public.profiles (id, username, email, security_question, security_answer)
+  insert into public.profiles (id, username, email)
   values (
     new.id,
     coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1)),
-    new.email,
-    new.raw_user_meta_data->>'securityQuestion',
-    new.raw_user_meta_data->>'securityAnswer'
+    new.email
   )
   on conflict (id) do nothing;
   return new;
