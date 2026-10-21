@@ -4,12 +4,46 @@ import {
   LogIn, UserPlus, ArrowRight, ArrowLeft, Check, Pencil, Plus, Trash2,
   LogOut, Wallet, ChevronRight, AlertCircle, X, Settings, Search,
   Sun, Moon, Download, Upload, Repeat, Target, TrendingUp, Calculator, Info,
-  Bug, Image, Send, Bot, MessageCircle, Sparkles
+  Bug, Image, Send, Bot, MessageCircle, Sparkles, Eye, EyeOff
 } from "lucide-react";
 
 /* ---------- helpers ---------- */
 const uid = () => Math.random().toString(36).slice(2, 9);
 const rupiah = (n) => "Rp" + Math.round(n || 0).toLocaleString("id-ID");
+function friendlyErrorMessage(error, fallback) {
+  const code = String(error?.code || "").toLowerCase();
+  const message = String(error?.message || error || "").toLowerCase();
+
+  if (["invalid_credentials", "email_not_found", "user_not_found"].includes(code)
+      || /invalid login credentials|user not found|email not found/.test(message)) {
+    return "Akun tidak ditemukan atau kata sandi salah. Periksa kembali email dan kata sandi.";
+  }
+  if (code === "email_not_confirmed" || message.includes("email not confirmed")) {
+    return "Email belum diverifikasi. Buka tautan verifikasi yang dikirim ke emailmu.";
+  }
+  if (["user_already_exists", "email_exists"].includes(code) || message.includes("already registered")) {
+    return "Email sudah terdaftar. Silakan masuk atau gunakan email lain.";
+  }
+  if (code === "weak_password" || message.includes("password should be")) {
+    return "Kata sandi belum memenuhi syarat. Gunakan kata sandi yang lebih kuat.";
+  }
+  if (code === "invalid_email" || message.includes("invalid email")) {
+    return "Format email tidak valid. Periksa kembali alamat emailmu.";
+  }
+  if (code === "23505" || message.includes("duplicate key")) {
+    return "Data tersebut sudah digunakan. Coba gunakan username atau email lain.";
+  }
+  if (code === "pgrst116") {
+    return "Data akun belum tersedia. Coba masuk kembali beberapa saat lagi.";
+  }
+  if (code === "429" || message.includes("rate limit") || message.includes("too many requests")) {
+    return "Terlalu banyak percobaan. Tunggu beberapa saat lalu coba lagi.";
+  }
+  if (message.includes("failed to fetch") || message.includes("network")) {
+    return "Koneksi bermasalah. Periksa internetmu lalu coba lagi.";
+  }
+  return fallback;
+}
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const monthKey = (d) => (d || "").slice(0, 7);
 const nowMonthKey = () => new Date().toISOString().slice(0, 7);
@@ -626,13 +660,16 @@ function AllocationRing({ categories, centerLabel, centerValue }) {
 }
 
 /* ---------- Auth screen ---------- */
-function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
+function AuthScreen({ onLogin, onRegister, onForgotPassword, error, notice, busy }) {
   const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [usernameStatus, setUsernameStatus] = useState("idle");
+  const [emailStatus, setEmailStatus] = useState("idle");
+  const [showPassword, setShowPassword] = useState(false);
+  const [showPasswordConfirmation, setShowPasswordConfirmation] = useState(false);
   const [securityQuestion, setSecurityQuestion] = useState(SECURITY_QUESTIONS[0]);
   const [securityAnswer, setSecurityAnswer] = useState("");
 
@@ -667,13 +704,35 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
     };
   }, [mode, username]);
 
+  useEffect(() => {
+    if (mode !== "register" || !emailValid) {
+      setEmailStatus("idle");
+      return undefined;
+    }
+
+    setEmailStatus("checking");
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const { data, error: availabilityError } = await supabase.rpc("is_email_available", {
+        candidate: email.trim(),
+      });
+      if (cancelled) return;
+      setEmailStatus(availabilityError ? "error" : data ? "available" : "taken");
+    }, 400);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [mode, email, emailValid]);
+
   const submit = () => {
     if (!password) return;
     if (mode === "login") {
       if (!emailValid) return;
       onLogin(email.trim(), password);
     } else {
-      if (!username.trim() || usernameStatus !== "available" || !emailValid || !passwordsMatch || !securityAnswer.trim()) return;
+      if (!username.trim() || usernameStatus !== "available" || !emailValid || emailStatus !== "available" || !passwordsMatch || !securityAnswer.trim()) return;
       onRegister(username.trim(), email.trim(), password, securityQuestion, securityAnswer.trim());
     }
   };
@@ -733,33 +792,72 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
               <input
                 type="email"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  setEmailStatus("idle");
+                }}
                 onKeyDown={onEnter(submit)}
                 placeholder="cth. user123@gmail.com"
               />
               {email.trim().length > 0 && !emailValid && (
                 <span className="text-xs" style={{ color: "var(--rose)" }}>Format email belum valid.</span>
               )}
+              {mode === "register" && emailValid && emailStatus === "checking" && (
+                <span className="muted text-xs">Mengecek ketersediaan email...</span>
+              )}
+              {mode === "register" && emailStatus === "available" && (
+                <span className="text-xs" style={{ color: "var(--teal)" }}>Email tersedia.</span>
+              )}
+              {mode === "register" && emailStatus === "taken" && (
+                <span className="text-xs" style={{ color: "var(--rose)" }}>Email sudah terdaftar. Silakan masuk atau gunakan email lain.</span>
+              )}
+              {mode === "register" && emailStatus === "error" && (
+                <span className="text-xs" style={{ color: "var(--rose)" }}>Email belum bisa dicek. Coba lagi.</span>
+              )}
             </Field>
             <Field label="Password">
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyDown={onEnter(submit)}
-                placeholder="••••••••"
-              />
+              <div style={{ position: "relative" }}>
+                <input
+                  type={showPassword ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  onKeyDown={onEnter(submit)}
+                  placeholder="••••••••"
+                  style={{ paddingRight: 42 }}
+                />
+                <button
+                  type="button"
+                  aria-label={showPassword ? "Sembunyikan password" : "Tampilkan password"}
+                  aria-pressed={showPassword}
+                  onClick={() => setShowPassword((visible) => !visible)}
+                  style={{ position: "absolute", top: "50%", right: 12, transform: "translateY(-50%)", padding: 0, border: "none", background: "none", color: "var(--muted)", cursor: "pointer", display: "flex" }}
+                >
+                  {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+                </button>
+              </div>
             </Field>
             {mode === "register" && (
               <>
                 <Field label="Konfirmasi Password">
-                  <input
-                    type="password"
-                    value={passwordConfirmation}
-                    onChange={(e) => setPasswordConfirmation(e.target.value)}
-                    onKeyDown={onEnter(submit)}
-                    placeholder="Ulangi password"
-                  />
+                  <div style={{ position: "relative" }}>
+                    <input
+                      type={showPasswordConfirmation ? "text" : "password"}
+                      value={passwordConfirmation}
+                      onChange={(e) => setPasswordConfirmation(e.target.value)}
+                      onKeyDown={onEnter(submit)}
+                      placeholder="Ulangi password"
+                      style={{ paddingRight: 42 }}
+                    />
+                    <button
+                      type="button"
+                      aria-label={showPasswordConfirmation ? "Sembunyikan konfirmasi password" : "Tampilkan konfirmasi password"}
+                      aria-pressed={showPasswordConfirmation}
+                      onClick={() => setShowPasswordConfirmation((visible) => !visible)}
+                      style={{ position: "absolute", top: "50%", right: 12, transform: "translateY(-50%)", padding: 0, border: "none", background: "none", color: "var(--muted)", cursor: "pointer", display: "flex" }}
+                    >
+                      {showPasswordConfirmation ? <EyeOff size={17} /> : <Eye size={17} />}
+                    </button>
+                  </div>
                   {passwordConfirmation && !passwordsMatch && (
                     <span className="text-xs" style={{ color: "var(--rose)" }}>Password tidak sama.</span>
                   )}
@@ -794,10 +892,15 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, busy }) {
                 <AlertCircle size={14} /> {error}
               </div>
             )}
+            {notice && (
+              <div className="flex items-center gap-2 text-sm" role="status" style={{ color: "var(--teal)" }}>
+                <Check size={14} /> {notice}
+              </div>
+            )}
             <button
               className="btn-primary flex items-center justify-center gap-2"
               onClick={submit}
-              disabled={busy || !password || !emailValid || (mode === "register" && (usernameStatus !== "available" || !passwordsMatch || !username.trim() || !securityAnswer.trim()))}
+              disabled={busy || !password || !emailValid || (mode === "register" && (usernameStatus !== "available" || emailStatus !== "available" || !passwordsMatch || !username.trim() || !securityAnswer.trim()))}
             >
               {mode === "login" ? "Masuk" : "Buat Akun"} <ArrowRight size={16} />
             </button>
@@ -2026,7 +2129,8 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
         if (typeof saved === "string") setSalaryError(`Gagal menyimpan gaji: ${saved}`);
         else if (!saved) setSalaryError("Gaji belum berhasil disimpan. Coba lagi.");
       } catch (error) {
-        setSalaryError(`Gagal menyimpan gaji: ${error.message || "Terjadi kesalahan."}`);
+        console.error("Salary save failed", error);
+        setSalaryError(friendlyErrorMessage(error, "Gaji belum berhasil disimpan. Coba lagi."));
       } finally {
         setSalaryBusy(false);
       }
@@ -2474,7 +2578,11 @@ function ForgotPasswordModal({ onClose }) {
       redirectTo: window.location.origin,
     });
     setBusy(false);
-    if (resetError) { setError(resetError.message); return; }
+    if (resetError) {
+      console.error("Password reset email request failed", resetError);
+      setError(friendlyErrorMessage(resetError, "Email reset belum dapat dikirim. Periksa alamat email dan coba lagi."));
+      return;
+    }
     setStep("done");
   };
 
@@ -2493,7 +2601,12 @@ function ForgotPasswordModal({ onClose }) {
     if (newPassword !== confirmPassword) { setError("Konfirmasi password tidak sama."); return; }
     setBusy(true); setError("");
     const { error: resetError } = await supabase.auth.updateUser({ password: newPassword });
-    if (resetError) { setBusy(false); setError(resetError.message); return; }
+    if (resetError) {
+      console.error("Password update failed", resetError);
+      setBusy(false);
+      setError(friendlyErrorMessage(resetError, "Password belum dapat diperbarui. Coba lagi."));
+      return;
+    }
     setBusy(false);
     setStep("done");
   };
@@ -2868,7 +2981,7 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
       setFeedbackSent(true);
     } catch (error) {
       console.error("feedback save failed", error);
-      setFeedbackError(error.message || "Laporan gagal disimpan. Silakan coba lagi.");
+      setFeedbackError(friendlyErrorMessage(error, "Laporan gagal disimpan. Periksa koneksi dan coba lagi."));
     } finally {
       setFeedbackSending(false);
     }
@@ -3166,7 +3279,7 @@ function AssistantChat({ user, transactions, onApplyAction }) {
       }]);
     } catch (requestError) {
       console.error("Pundi assistant request failed", requestError);
-      setError(requestError.message || "Asisten sedang tidak tersedia. Coba lagi sebentar.");
+      setError(friendlyErrorMessage(requestError, "Asisten sedang tidak tersedia. Coba lagi sebentar."));
       setInput(text);
     } finally {
       setSending(false);
@@ -3194,7 +3307,7 @@ function AssistantChat({ user, transactions, onApplyAction }) {
         ...message,
         actions: message.actions.map((item, index) => index === actionIndex ? { ...item, status: "failed" } : item),
       }));
-      setError(applyError.message || "Tindakan gagal diterapkan.");
+      setError(friendlyErrorMessage(applyError, "Tindakan belum dapat diterapkan. Periksa data dan coba lagi."));
     } finally {
       applyingActionsRef.current.delete(actionKey);
     }
@@ -3753,6 +3866,7 @@ export default function App() {
   const [user, setUser] = useState(null);
   const [transactions, setTransactions] = useState([]);
   const [authError, setAuthError] = useState("");
+  const [authNotice, setAuthNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState("dashboard"); // dashboard | category | editAlloc | monthlyHistory | settings | goals
   const [activeCategoryId, setActiveCategoryId] = useState(null);
@@ -3766,28 +3880,62 @@ export default function App() {
   const [accountLoaded, setAccountLoaded] = useState(false);
   const txSaveQueueRef = useRef(Promise.resolve());
   const profileSaveQueueRef = useRef(Promise.resolve());
+  const profileMutationQueueRef = useRef(Promise.resolve());
   const accountLoadRef = useRef(null);
+  const userRef = useRef(null);
+  const signupConfirmationRef = useRef(false);
+  const signupConfirmationHandledRef = useRef(false);
 
   useEffect(() => {
+    signupConfirmationRef.current = new URLSearchParams(window.location.search).get("auth") === "signup";
+    const completeSignupConfirmation = async (session) => {
+      if (signupConfirmationHandledRef.current) return;
+      signupConfirmationHandledRef.current = true;
+      if (session) {
+        const { error } = await supabase.auth.signOut();
+        if (error) throw error;
+      }
+      signupConfirmationRef.current = false;
+      window.history.replaceState(null, "", window.location.pathname);
+      setAuthError("");
+      setAuthNotice("Email berhasil diverifikasi. Silakan masuk dengan akunmu.");
+      setSessionChecked(true);
+    };
+
     (async () => {
       const savedTheme = await readKey(THEME_KEY, false);
       if (savedTheme === "light" || savedTheme === "dark") setTheme(savedTheme);
 
       const { data: { session } } = await supabase.auth.getSession();
+      if (signupConfirmationRef.current) {
+        await completeSignupConfirmation(session);
+        return;
+      }
       if (session) await loadAccount(session.user.id);
       setSessionChecked(true);
     })().catch((error) => {
       console.error("Supabase session load failed", error);
-      setAuthError(error.message);
+      setAuthError(friendlyErrorMessage(error, "Sesi belum dapat dimuat. Silakan muat ulang halaman atau masuk kembali."));
       setSessionChecked(true);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (signupConfirmationRef.current && event === "SIGNED_IN" && session) {
+        try {
+          await completeSignupConfirmation(session);
+        } catch (error) {
+          console.error("Email verification completion failed", error);
+          setAuthError("Email sudah diverifikasi, tetapi sesi belum dapat ditutup. Muat ulang halaman lalu masuk kembali.");
+          setSessionChecked(true);
+        }
+        return;
+      }
       if (event === "SIGNED_IN" && session && !user) {
         try {
           await loadAccount(session.user.id);
         } catch (error) {
-          setAuthError(error.message);
+          console.error("Account load after sign-in failed", error);
+          setAuthError(friendlyErrorMessage(error, "Data akun belum dapat dimuat. Coba masuk kembali beberapa saat lagi."));
         }
       }
     });
@@ -3815,8 +3963,16 @@ export default function App() {
     const storedMonthlyIncomes = profile.monthly_incomes || {};
     const hasSavedSalaryPeriods = Object.prototype.hasOwnProperty.call(storedMonthlyIncomes, "__pundi_salary_periods");
     const hasSavedPayDay = Object.prototype.hasOwnProperty.call(storedMonthlyIncomes, "__pundi_pay_day");
-    setUser({
+    const storedCategories = Array.isArray(profile.categories) ? profile.categories : [];
+    const knownStages = new Set(["onboarding", "choice", "custom", "resume", "dashboard"]);
+    let loadedStage = knownStages.has(profile.stage) ? profile.stage : "onboarding";
+    if (["onboarding", "choice", "custom"].includes(loadedStage) && storedCategories.length > 0) {
+      loadedStage = profile.confirmed ? "dashboard" : "resume";
+    }
+    const loadedUser = {
       ...profile,
+      categories: storedCategories,
+      stage: loadedStage,
       monthlyIncomes: Object.fromEntries(Object.entries(storedMonthlyIncomes).filter(([key]) => /^\d{4}-\d{2}$/.test(key))),
       monthlyIncomePromptDismissed: profile.monthly_income_prompt_dismissed || {},
       salaryPeriods: hasSavedSalaryPeriods
@@ -3830,7 +3986,9 @@ export default function App() {
       passwordHash: undefined,
       securityQuestion: profile.security_question,
       securityAnswer: profile.security_answer,
-    });
+    };
+    userRef.current = loadedUser;
+    setUser(loadedUser);
     setTransactions((tx || []).map(({ user_id, category_id, sub_id, direct_asset, ...item }) => ({
       ...item,
       categoryId: category_id,
@@ -3877,15 +4035,22 @@ export default function App() {
 
   const persistUser = async (u) => {
     const save = profileSaveQueueRef.current.then(async () => {
-      const { error } = await supabase.from("profiles").upsert(profilePayload(u));
+      const { data, error } = await supabase
+        .from("profiles")
+        .upsert(profilePayload(u))
+        .select("id, stage, confirmed, categories")
+        .single();
       if (error) throw error;
+      if (!data || data.id !== u.id || data.stage !== (u.stage || "onboarding")) {
+        throw new Error("Profile save could not be verified.");
+      }
     });
     profileSaveQueueRef.current = save.catch(() => {});
     try {
       await save;
     } catch (error) {
       console.error("profile save failed", error);
-      setAuthError(`Perubahan akun gagal disimpan: ${error.message}`);
+      setAuthError(friendlyErrorMessage(error, "Perubahan akun belum tersimpan. Periksa koneksi lalu coba lagi."));
       throw error;
     }
   };
@@ -3910,11 +4075,12 @@ export default function App() {
     txSaveQueueRef.current = save.catch(() => {});
     return save.catch(async (error) => {
       console.error("transaction save failed", error);
-      setAuthError(`Perubahan transaksi gagal disimpan: ${error.message}`);
+      setAuthError(friendlyErrorMessage(error, "Perubahan transaksi belum tersimpan. Periksa koneksi lalu coba lagi."));
       try {
         await loadAccount(userId);
       } catch (reloadError) {
-        setAuthError(`Data akun gagal dimuat ulang: ${reloadError.message}`);
+        console.error("Account reload after transaction failure failed", reloadError);
+        setAuthError("Data akun belum dapat dimuat ulang. Muat ulang halaman sebelum melanjutkan.");
       }
       throw error;
     });
@@ -3929,29 +4095,42 @@ export default function App() {
   });
 
   const updateUser = (patch) => {
-    setUser((prev) => {
-      const next = { ...prev, ...patch };
-      void persistUser(next).catch(() => {});
-      return next;
+    const save = profileMutationQueueRef.current.then(async () => {
+      const current = userRef.current;
+      if (!current) return false;
+      const next = { ...current, ...patch };
+      await persistUser(next);
+      userRef.current = next;
+      setUser(next);
+      setAuthError("");
+      return true;
     });
+    profileMutationQueueRef.current = save.catch(() => {});
+    return save.catch(() => false);
   };
 
   const handleLogin = async (email, password) => {
-    setBusy(true); setAuthError("");
+    setBusy(true); setAuthError(""); setAuthNotice("");
     const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
-    if (error) { setBusy(false); setAuthError(error.message); return; }
+    if (error) {
+      console.error("Sign-in failed", error);
+      setBusy(false);
+      setAuthError(friendlyErrorMessage(error, "Tidak dapat masuk saat ini. Periksa data akun dan coba lagi."));
+      return;
+    }
     try {
       await loadAccount(data.user.id);
       setPage("dashboard");
     } catch (loadError) {
-      setAuthError(loadError.message);
+      console.error("Account load during login failed", loadError);
+      setAuthError(friendlyErrorMessage(loadError, "Akun berhasil dikenali, tetapi datanya belum dapat dimuat. Coba lagi."));
     } finally {
       setBusy(false);
     }
   };
 
   const handleRegister = async (username, email, password, securityQuestion, securityAnswer) => {
-    setBusy(true); setAuthError("");
+    setBusy(true); setAuthError(""); setAuthNotice("");
     const { data: authData, error } = await supabase.auth.signUp({
       email: email.trim(),
       password,
@@ -3960,7 +4139,17 @@ export default function App() {
         data: { username, securityQuestion, securityAnswer },
       },
     });
-    if (error) { setBusy(false); setAuthError(error.message); return; }
+    if (error) {
+      console.error("Registration failed", error);
+      setBusy(false);
+      setAuthError(friendlyErrorMessage(error, "Akun belum dapat dibuat. Periksa data dan coba lagi."));
+      return;
+    }
+    if (authData.user?.identities?.length === 0) {
+      setBusy(false);
+      setAuthError("Email sudah terdaftar. Silakan masuk atau gunakan email lain.");
+      return;
+    }
     if (!authData.session) {
       setBusy(false);
       setAuthError("Pendaftaran berhasil. Silakan verifikasi email sebelum masuk.");
@@ -3981,7 +4170,12 @@ export default function App() {
       stage: "onboarding",
     };
     const { error: profileError } = await supabase.from("profiles").upsert(profilePayload(newUser));
-    if (profileError) { setBusy(false); setAuthError(profileError.message); return; }
+    if (profileError) {
+      console.error("Initial profile creation failed", profileError);
+      setBusy(false);
+      setAuthError(friendlyErrorMessage(profileError, "Akun berhasil dibuat, tetapi profil belum siap. Coba masuk kembali atau hubungi admin."));
+      return;
+    }
     setBusy(false);
     setAccountLoaded(true);
     setTransactions([]);
@@ -3990,6 +4184,7 @@ export default function App() {
 
   const handleLogout = () => {
     void supabase.auth.signOut();
+    userRef.current = null;
     setUser(null);
     setTransactions([]);
     setAccountLoaded(false);
@@ -4042,6 +4237,7 @@ export default function App() {
     } catch (error) {
       return;
     }
+    userRef.current = resetUser;
     setUser(resetUser);
     setTransactions([]);
     setPage("dashboard");
@@ -4072,8 +4268,9 @@ export default function App() {
     try {
       await persistUser(nextUser);
     } catch (error) {
-      return error.message || "Profil gagal disimpan.";
+      return friendlyErrorMessage(error, "Profil belum berhasil disimpan. Periksa koneksi lalu coba lagi.");
     }
+    userRef.current = nextUser;
     setUser(nextUser);
     setShowAddMoney(false);
     return true;
@@ -4166,6 +4363,7 @@ export default function App() {
         : period);
       const nextUser = { ...user, categories, salaryPeriods };
       await persistUser(nextUser);
+      userRef.current = nextUser;
       setUser(nextUser);
       return;
     }
@@ -4192,6 +4390,7 @@ export default function App() {
       }];
       const nextUser = { ...user, goals };
       await persistUser(nextUser);
+      userRef.current = nextUser;
       setUser(nextUser);
       return;
     }
@@ -4202,11 +4401,13 @@ export default function App() {
   const handleDeleteAccount = async () => {
     const { error } = await supabase.rpc("delete_my_account");
     if (error) {
-      setAuthError(error.message);
+      console.error("Account deletion failed", error);
+      setAuthError(friendlyErrorMessage(error, "Akun belum dapat dihapus. Coba lagi atau hubungi admin."));
       return;
     }
     await supabase.auth.signOut();
     setShowDeleteAccount(false);
+    userRef.current = null;
     setUser(null);
     setTransactions([]);
     setPage("dashboard");
@@ -4232,12 +4433,13 @@ export default function App() {
           onRegister={handleRegister}
           onForgotPassword={() => setShowForgotPassword(true)}
           error={authError}
+          notice={authNotice}
           busy={busy}
         />
         {pendingUser && (
           <WelcomeModal
             name={pendingUser.name}
-            onContinue={() => { setUser(pendingUser); setPendingUser(null); }}
+            onContinue={() => { userRef.current = pendingUser; setUser(pendingUser); setPendingUser(null); }}
           />
         )}
         {showForgotPassword && <ForgotPasswordModal onClose={() => setShowForgotPassword(false)} />}
@@ -4398,6 +4600,12 @@ export default function App() {
   return (
     <div className={"mmp-app" + (theme === "light" ? " theme-light" : "")}>
       <style>{STYLE}</style>
+      {user && authError && (
+        <div className="card p-3 mx-auto mt-3 flex items-center justify-between gap-3" role="alert" style={{ maxWidth: 760, borderColor: "var(--rose)", color: "var(--rose)" }}>
+          <span className="text-sm flex items-center gap-2"><AlertCircle size={15} /> {authError}</span>
+          <button className="icon-btn" aria-label="Tutup pesan error" onClick={() => setAuthError("")}><X size={15} /></button>
+        </div>
+      )}
       {content}
       {user && accountLoaded && !pendingUser && (
         <AssistantChat

@@ -47,6 +47,8 @@ transaksi.
 1. Buat project di [supabase.com](https://supabase.com).
 2. Buka **SQL Editor**, lalu jalankan isi [`supabase/schema.sql`](./supabase/schema.sql)
    dan [`supabase/feedback.sql`](./supabase/feedback.sql).
+   Jika project Supabase sudah disiapkan sebelumnya, jalankan ulang `schema.sql`
+   untuk menambahkan pemeriksaan ketersediaan email saat pendaftaran.
 3. Salin `.env.example` menjadi `.env.local`.
 4. Isi `VITE_SUPABASE_URL` dan `VITE_SUPABASE_ANON_KEY` dari **Project Settings →
    API**. Gunakan key `anon`/publishable, bukan `service_role`. Isi
@@ -56,22 +58,25 @@ transaksi.
 
 ### Redirect verifikasi email
 
-Saat pendaftaran, Pundi mengarahkan verifikasi ke
-`<VITE_APP_URL>/auth/callback`. Supabase perlu mengizinkan URL tersebut:
+Saat pendaftaran, Pundi mengarahkan verifikasi ke halaman utama dengan penanda
+`?auth=signup`. Menggunakan halaman utama menghindari error 404 pada hosting yang
+belum menyiapkan fallback untuk route SPA. Setelah tautan valid, Pundi menutup
+sesi verifikasi dan menampilkan form masuk. Supabase perlu mengizinkan URL
+callback tersebut:
 
 1. Buka **Authentication → URL Configuration** di Supabase.
 2. Set **Site URL** ke URL utama website, misalnya
    `https://pundi.example.com`.
-3. Tambahkan URL callback persis ke **Redirect URLs**, misalnya
-   `https://pundi.example.com/auth/callback`. Untuk development, tambahkan
-   `http://localhost:5173/auth/callback` dan/atau
-   `http://127.0.0.1:5173/auth/callback` sesuai alamat yang dibuka.
+3. Tambahkan URL berikut ke **Redirect URLs**:
+   `https://pundi.example.com/?auth=signup`. Untuk development, tambahkan
+   `http://localhost:5173/?auth=signup` dan/atau
+   `http://127.0.0.1:5173/?auth=signup` sesuai alamat yang dibuka.
 4. Di **Authentication → Email Templates → Confirm signup**, pastikan tombol
    konfirmasi memakai `{{ .ConfirmationURL }}` sebagai URL-nya. Supabase akan
    memverifikasi email lalu mengarahkan kembali ke callback aplikasi.
 5. Untuk website production, isi `VITE_APP_URL` dengan domain production
-   sebelum menjalankan build/deploy. Hosting harus mengarahkan path
-   `/auth/callback` ke `index.html` agar aplikasi SPA dapat memuat callback.
+   sebelum menjalankan build/deploy. Pastikan nilainya sama dengan domain
+   callback yang diizinkan di Supabase.
 
 Setelah mengubah `.env.local`, restart server Vite. Perubahan URL di dashboard
 Supabase berlaku tanpa mengubah kode aplikasi.
