@@ -24,6 +24,18 @@ function friendlyErrorMessage(error, fallback) {
   if (["user_already_exists", "email_exists"].includes(code) || message.includes("already registered")) {
     return "Email sudah terdaftar. Silakan masuk atau gunakan email lain.";
   }
+  if (["email_address_not_authorized", "email_provider_disabled"].includes(code)
+      || message.includes("error sending confirmation email")
+      || message.includes("email address not authorized")
+      || message.includes("email provider is disabled")) {
+    return "Pendaftaran belum dapat dilanjutkan karena email verifikasi gagal dikirim. Periksa konfigurasi SMTP atau provider email di Supabase.";
+  }
+  if (message.includes("database error saving new user")) {
+    return "Pendaftaran gagal saat menyiapkan profil akun. Pastikan schema.sql terbaru sudah dijalankan di Supabase dan username belum digunakan.";
+  }
+  if (code === "signup_disabled" || message.includes("signups not allowed")) {
+    return "Pendaftaran akun sedang dinonaktifkan. Periksa pengaturan sign-up di Supabase Authentication.";
+  }
   if (code === "weak_password" || message.includes("password should be")) {
     return "Kata sandi belum memenuhi syarat. Gunakan kata sandi yang lebih kuat.";
   }
@@ -37,7 +49,7 @@ function friendlyErrorMessage(error, fallback) {
     return "Data akun belum tersedia. Coba masuk kembali beberapa saat lagi.";
   }
   if (code === "429" || message.includes("rate limit") || message.includes("too many requests")) {
-    return "Terlalu banyak percobaan. Tunggu beberapa saat lalu coba lagi.";
+    return "Limit pembuatan akun terlampaui. Tunggu beberapa saat lalu coba lagi.";
   }
   if (message.includes("failed to fetch") || message.includes("network")) {
     return "Koneksi bermasalah. Periksa internetmu lalu coba lagi.";
@@ -675,6 +687,7 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, notice, busy
 
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
   const passwordsMatch = password === passwordConfirmation;
+  const normalizedEmail = email.trim().toLowerCase();
 
   useEffect(() => {
     if (mode !== "register") {
@@ -710,30 +723,35 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, notice, busy
       return undefined;
     }
 
-    setEmailStatus("checking");
     let cancelled = false;
+    setEmailStatus("checking");
     const timer = setTimeout(async () => {
       const { data, error: availabilityError } = await supabase.rpc("is_email_available", {
-        candidate: email.trim(),
+        candidate: normalizedEmail,
       });
       if (cancelled) return;
-      setEmailStatus(availabilityError ? "error" : data ? "available" : "taken");
+      if (availabilityError) {
+        console.error("Email availability check failed", availabilityError);
+        setEmailStatus("error");
+        return;
+      }
+      setEmailStatus(data ? "available" : "taken");
     }, 400);
 
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [mode, email, emailValid]);
+  }, [mode, normalizedEmail, emailValid]);
 
   const submit = () => {
-    if (!password) return;
+    if (busy || !password) return;
     if (mode === "login") {
       if (!emailValid) return;
-      onLogin(email.trim(), password);
+      onLogin(normalizedEmail, password);
     } else {
       if (!username.trim() || usernameStatus !== "available" || !emailValid || emailStatus !== "available" || !passwordsMatch || !securityAnswer.trim()) return;
-      onRegister(username.trim(), email.trim(), password, securityQuestion, securityAnswer.trim());
+      onRegister(username.trim(), normalizedEmail, password, securityQuestion, securityAnswer.trim());
     }
   };
 
@@ -812,7 +830,7 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, notice, busy
                 <span className="text-xs" style={{ color: "var(--rose)" }}>Email sudah terdaftar. Silakan masuk atau gunakan email lain.</span>
               )}
               {mode === "register" && emailStatus === "error" && (
-                <span className="text-xs" style={{ color: "var(--rose)" }}>Email belum bisa dicek. Coba lagi.</span>
+                <span className="text-xs" style={{ color: "var(--rose)" }}>Email belum bisa dicek. Pastikan fungsi database sudah diperbarui, lalu coba lagi.</span>
               )}
             </Field>
             <Field label="Password">

@@ -48,7 +48,7 @@ transaksi.
 2. Buka **SQL Editor**, lalu jalankan isi [`supabase/schema.sql`](./supabase/schema.sql)
    dan [`supabase/feedback.sql`](./supabase/feedback.sql).
    Jika project Supabase sudah disiapkan sebelumnya, jalankan ulang `schema.sql`
-   untuk menambahkan pemeriksaan ketersediaan email saat pendaftaran.
+   untuk memperbarui pemeriksaan ketersediaan email dan skema RPC.
 3. Salin `.env.example` menjadi `.env.local`.
 4. Isi `VITE_SUPABASE_URL` dan `VITE_SUPABASE_ANON_KEY` dari **Project Settings →
    API**. Gunakan key `anon`/publishable, bukan `service_role`. Isi

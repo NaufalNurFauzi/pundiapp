@@ -78,16 +78,20 @@ $$;
 revoke all on function public.is_username_available(text) from public;
 grant execute on function public.is_username_available(text) to anon, authenticated;
 
+create index if not exists profiles_email_lower_idx
+  on public.profiles (lower(btrim(email)));
+
 create or replace function public.is_email_available(candidate text)
 returns boolean
 language sql
-security definer set search_path = public
+security definer
+set search_path = ''
 as $$
-  select nullif(trim(candidate), '') is not null
+  select nullif(btrim(candidate), '') is not null
     and not exists (
       select 1
-      from auth.users
-      where lower(email) = lower(trim(candidate))
+      from public.profiles
+      where lower(btrim(email)) = lower(btrim(candidate))
     );
 $$;
 
@@ -135,3 +139,5 @@ create policy "Users can update their transactions"
 drop policy if exists "Users can delete their transactions" on public.transactions;
 create policy "Users can delete their transactions"
   on public.transactions for delete using (auth.uid() = user_id);
+
+notify pgrst, 'reload schema';
