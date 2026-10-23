@@ -43,10 +43,17 @@ function friendlyErrorMessage(error, fallback) {
     return "Format email tidak valid. Periksa kembali alamat emailmu.";
   }
   if (code === "23505" || message.includes("duplicate key")) {
-    return "Data tersebut sudah digunakan. Coba gunakan username atau email lain.";
+    return "Data dengan ID yang sama sudah tersimpan. Periksa kembali data lalu coba lagi.";
   }
   if (code === "pgrst116") {
     return "Data akun belum tersedia. Coba masuk kembali beberapa saat lagi.";
+  }
+  if (code === "pgrst202" || code === "42883" ||
+      /replace_my_transactions.*(not found|does not exist)|could not find the function/.test(message)) {
+    return "Fitur impor belum tersedia di database. Jalankan ulang supabase/schema.sql pada project Supabase yang digunakan aplikasi.";
+  }
+  if (code === "42703" || /borrowed_from_category_id|borrowed_amount/.test(message)) {
+    return "Struktur database belum diperbarui untuk format backup terbaru. Jalankan ulang supabase/schema.sql di Supabase.";
   }
   if (code === "429" || message.includes("rate limit") || message.includes("too many requests")) {
     return "Limit pembuatan akun terlampaui. Tunggu beberapa saat lalu coba lagi.";
@@ -786,7 +793,7 @@ function AllocationRing({ categories, centerLabel, centerValue }) {
 }
 
 /* ---------- Auth screen ---------- */
-function AuthScreen({ onLogin, onRegister, onForgotPassword, error, notice, busy }) {
+function AuthScreen({ onLogin, onRegister, onForgotPassword, notice, busy }) {
   const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
@@ -1018,11 +1025,6 @@ function AuthScreen({ onLogin, onRegister, onForgotPassword, error, notice, busy
               >
                 Lupa password?
               </button>
-            )}
-            {error && (
-              <div className="flex items-center gap-2 text-sm" style={{ color: "var(--rose)" }}>
-                <AlertCircle size={14} /> {error}
-              </div>
             )}
             {notice && (
               <div className="flex items-center gap-2 text-sm" role="status" style={{ color: "var(--teal)" }}>
@@ -1631,7 +1633,7 @@ function AppFooter() {
       >
         @naufalnurf__
       </a>
-      <span className="muted"> · v1.3.5</span>
+      <span className="muted"> · v1.3.6</span>
     </footer>
   );
 }
@@ -1914,43 +1916,56 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const withdrawnForSub = (sid) => monthTx.filter((t) => t.subId === sid && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const topupForSub = (sid) => monthTx.filter((t) => t.subId === sid && isTopupTx(t)).reduce((s, t) => s + Number(t.amount), 0);
 
+  const subAllocationRemaining = (targetSubId) => {
+    if (!targetSubId) return remaining;
+    const sub = cat.subs.find((item) => item.id === targetSubId);
+    if (!sub) return remaining;
+    const subAlloc = baseAllocated * sub.percent / 100 +
+      topupForSub(sub.id) +
+      periodCarryoverAmount(activePeriod, cat.id, sub.id);
+    const subMovement = spentForSub(sub.id) - (isAsset ? withdrawnForSub(sub.id) : 0);
+    return Math.min(remaining, subAlloc - subMovement);
+  };
   const checkBalance = (amt, targetSubId) => {
-    if (targetSubId) {
-      const sub = cat.subs.find((s) => s.id === targetSubId);
-      if (sub) {
-        const subAlloc = baseAllocated * sub.percent / 100 + topupForSub(sub.id) + periodCarryoverAmount(activePeriod, cat.id, sub.id);
-        const subMovement = spentForSub(sub.id) - (isAsset ? withdrawnForSub(sub.id) : 0);
-        const subRemaining = subAlloc - subMovement;
-        if (amt > subRemaining) return `Sisa alokasi "${sub.name}" tidak mencukupi. Sisa saat ini ${rupiah(subRemaining)}.`;
-      }
+    const available = subAllocationRemaining(targetSubId);
+    if (amt > available) {
+      const sub = cat.subs.find((item) => item.id === targetSubId);
+      return `Sisa alokasi "${sub ? sub.name : cat.name}" tidak mencukupi. Sisa saat ini ${rupiah(available)}.`;
     }
-    if (amt > remaining) return `Sisa alokasi "${cat.name}" tidak mencukupi. Sisa saat ini ${rupiah(remaining)}.`;
     return "";
   };
+  const spendingRemaining = isAsset ? remaining : subAllocationRemaining(subId);
   const sourceCategory = user.categories.find((category) => category.id === borrowedFromCategoryId && !category.isAsset);
-  const requiredBorrowAmount = Math.max(0, Number(amount || 0) - Math.max(0, remaining));
+  const requiredBorrowAmount = Math.max(0, Number(amount || 0) - Math.max(0, spendingRemaining));
   const sourceRemaining = sourceCategory
     ? allocationRemaining(user, transactions, activePeriod, sourceCategory.id)
     : 0;
+  const hasPeriodLoans = allMonthTx.some((transaction) =>
+    isExpenseTx(transaction) &&
+    !transaction.directAsset &&
+    transactionBorrowedAmount(transaction) > 0 &&
+    (transaction.categoryId === cat.id || transaction.borrowedFromCategoryId === cat.id)
+  );
   const relevantLoans = getOutstandingAllocationLoans(user, transactions)
     .filter((loan) => loan.fromCategoryId === cat.id || loan.toCategoryId === cat.id);
 
   const submitSetor = () => {
     const amt = Number(amount);
     if (!(amt > 0)) { setFormError("Masukkan jumlah yang valid."); return; }
-    if (amt > remaining) {
+    if (amt > spendingRemaining) {
       const eligibleSources = user.categories.filter((category) => !category.isAsset && category.id !== cat.id);
       if (eligibleSources.length) {
-        setBorrowPromptMessage(`Sisa alokasi "${cat.name}" ${rupiah(Math.max(0, remaining))} tidak cukup.`);
+        const sub = cat.subs.find((item) => item.id === subId);
+        const targetName = sub ? sub.name : cat.name;
+        setBorrowPromptMessage(`Sisa alokasi "${targetName}" ${rupiah(Math.max(0, spendingRemaining))} tidak cukup.`);
         setBorrowedFromCategoryId(eligibleSources[0].id);
         setBorrowPromptStage("confirm");
       } else {
-        setFormError(`Sisa alokasi "${cat.name}" tidak mencukupi. Sisa saat ini ${rupiah(remaining)}.`);
+        const sub = cat.subs.find((item) => item.id === subId);
+        setFormError(`Sisa alokasi "${sub ? sub.name : cat.name}" tidak mencukupi. Sisa saat ini ${rupiah(spendingRemaining)}.`);
       }
       return;
     }
-    const err = checkBalance(amt, subId);
-    if (err) { setFormError(err); return; }
     setFormError("");
     onAddTx({
       id: uid(),
@@ -1985,7 +2000,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
       setFormError("Pilih alokasi sumber pinjaman yang valid.");
       return;
     }
-    const borrowedAmount = Math.max(0, amt - Math.max(0, remaining));
+    const borrowedAmount = Math.max(0, amt - Math.max(0, spendingRemaining));
     if (borrowedAmount <= 0) {
       setFormError("Pinjaman tidak diperlukan karena sisa alokasi kategori ini masih cukup.");
       return;
@@ -2022,13 +2037,16 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const recordRecurring = (r) => {
     const err = checkBalance(r.amount, r.subId);
     if (err) {
-      if (r.amount > remaining && user.categories.some((category) => !category.isAsset && category.id !== cat.id)) {
+      const available = subAllocationRemaining(r.subId);
+      const eligibleSource = user.categories.find((category) => !category.isAsset && category.id !== cat.id);
+      if (!isAsset && r.amount > available && eligibleSource) {
         setAmount(String(r.amount));
         setNote(r.name);
         setSubId(r.subId || "");
         setDate(todayStr());
-        setBorrowPromptMessage(`Sisa alokasi "${cat.name}" ${rupiah(Math.max(0, remaining))} tidak cukup.`);
-        setBorrowedFromCategoryId(user.categories.find((category) => !category.isAsset && category.id !== cat.id).id);
+        const sub = cat.subs.find((item) => item.id === r.subId);
+        setBorrowPromptMessage(`Sisa alokasi "${sub ? sub.name : cat.name}" ${rupiah(Math.max(0, available))} tidak cukup.`);
+        setBorrowedFromCategoryId(eligibleSource.id);
         setBorrowPromptStage("confirm");
         setRecError("");
       } else {
@@ -2110,13 +2128,10 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
           )}
         </div>
 
-        {!isAsset && (
+        {!isAsset && hasPeriodLoans && (
           <div className="card p-4">
             <p className="muted text-xs uppercase tracking-wide mb-1">Keterangan pinjaman alokasi · periode ini</p>
             <AllocationLoanNote user={user} transactions={allMonthTx} categoryId={cat.id} />
-            {!allMonthTx.some((transaction) =>
-              transaction.borrowedFromCategoryId === cat.id || transaction.categoryId === cat.id && transaction.borrowedFromCategoryId
-            ) && <p className="muted text-sm">Tidak ada transaksi pinjaman untuk alokasi ini.</p>}
           </div>
         )}
 
@@ -3272,7 +3287,7 @@ function DeleteAccountModal({ user, onClose, onConfirm }) {
 }
 
 /* ---------- Settings page ---------- */
-function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfile, onImport, onMigrateLocal, onBack, onOpenReset, onOpenDelete, onLogout }) {
+function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfile, onImport, onBack, onOpenReset, onOpenDelete, onLogout }) {
   const [name, setName] = useState(user.name || "");
   const [age, setAge] = useState(user.age || "");
   const [income, setIncome] = useState(user.income || "");
@@ -3282,8 +3297,7 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
   const [importOk, setImportOk] = useState(false);
-  const [migrationError, setMigrationError] = useState("");
-  const [migrationOk, setMigrationOk] = useState(false);
+  const [importFileName, setImportFileName] = useState("");
   const [feedbackType, setFeedbackType] = useState("bug");
   const [feedbackDescription, setFeedbackDescription] = useState("");
   const [feedbackFile, setFeedbackFile] = useState(null);
@@ -3291,6 +3305,7 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
   const [feedbackSending, setFeedbackSending] = useState(false);
   const [feedbackSent, setFeedbackSent] = useState(false);
   const feedbackFileInputRef = useRef(null);
+  const backupFileInputRef = useRef(null);
 
   const profileValid = name.trim() && Number(age) > 0 && Number(income) > 0 && Number(payDay) >= 1 && Number(payDay) <= 31;
   const saveProfile = async () => {
@@ -3330,19 +3345,47 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
     triggerDownload(`pundi-transaksi-${user.username}-${todayStr()}.csv`, transactionsToCsv(user, transactions), "text/csv");
   };
 
+  const isValidBackupDate = (value) => {
+    if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const date = new Date(`${value}T00:00:00.000Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+  };
+
+  const loadBackupFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > 20 * 1024 * 1024) {
+      setImportError("Ukuran file backup maksimal 20 MB.");
+      return;
+    }
+    try {
+      const text = await file.text();
+      setImportText(text);
+      setImportFileName(file.name);
+      setImportError("");
+      setImportOk(false);
+    } catch (error) {
+      console.error("Backup file read failed", error);
+      setImportError("File backup tidak dapat dibaca. Coba pilih file JSON lain.");
+    }
+  };
+
   const doImport = async () => {
     setImportError(""); setImportOk(false);
     let parsed;
     try {
       parsed = JSON.parse(importText);
-      if (!parsed.user || !Array.isArray(parsed.transactions)) throw new Error("format");
+      if (!parsed || !parsed.user || !Array.isArray(parsed.transactions)) throw new Error("format");
       const u = parsed.user;
       if (!Array.isArray(u.categories)) throw new Error("format");
       if (parsed.transactions.some((tx) =>
         !tx ||
-        typeof tx.id !== "string" ||
-        typeof tx.date !== "string" ||
-        !/^\d{4}-\d{2}-\d{2}$/.test(tx.date) ||
+        (typeof tx.id !== "string" && !(typeof tx.id === "number" && Number.isFinite(tx.id))) ||
+        !String(tx.id).trim() ||
+        !isValidBackupDate(tx.date) ||
+        tx.amount === null ||
+        tx.amount === undefined ||
         !Number.isFinite(Number(tx.amount)) ||
         Number(tx.amount) < 0 ||
         (tx.borrowedAmount !== null && tx.borrowedAmount !== undefined &&
@@ -3358,6 +3401,16 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
 
     const u = parsed.user;
     try {
+      const normalizedTransactions = parsed.transactions.map((tx) => ({
+        ...tx,
+        id: String(tx.id),
+        amount: Number(tx.amount),
+        categoryId: tx.categoryId == null ? null : String(tx.categoryId),
+        subId: tx.subId == null ? null : String(tx.subId),
+        goalId: tx.goalId == null ? null : String(tx.goalId),
+        borrowedFromCategoryId: tx.borrowedFromCategoryId == null ? null : String(tx.borrowedFromCategoryId),
+        borrowedAmount: tx.borrowedAmount == null ? null : Number(tx.borrowedAmount),
+      }));
       await onImport({
         name: u.name || "", age: u.age || null, income: u.income || null,
         monthlyIncomes: (u.monthlyIncomes && typeof u.monthlyIncomes === "object")
@@ -3370,35 +3423,13 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
         recurring: Array.isArray(u.recurring) ? u.recurring : [],
         goals: Array.isArray(u.goals) ? u.goals : [],
         confirmed: true, stage: "dashboard",
-      }, parsed.transactions);
+      }, normalizedTransactions);
       setImportOk(true);
       setImportText("");
+      setImportFileName("");
     } catch (error) {
       console.error("Backup import failed", error);
-      setImportError(friendlyErrorMessage(error, error?.message || "Impor gagal disimpan. Data sebelumnya tetap dipertahankan."));
-    }
-  };
-  const migrateLocal = async () => {
-    setMigrationError(""); setMigrationOk(false);
-    try {
-      const prefix = "pundi:shared:";
-      const localUser = JSON.parse(window.localStorage.getItem(`${prefix}mmp_user_${user.username}`) || "null");
-      const localTx = JSON.parse(window.localStorage.getItem(`${prefix}mmp_tx_${user.username}`) || "[]");
-      if (!localUser || !Array.isArray(localTx)) throw new Error("missing");
-      const migrated = await onMigrateLocal({
-        name: localUser.name || "", age: localUser.age || null, income: localUser.income || null,
-        monthlyIncomes: localUser.monthlyIncomes || {},
-        salaryPeriods: Array.isArray(localUser.salaryPeriods) ? localUser.salaryPeriods : [],
-        payDay: Math.max(1, Math.min(31, Number(localUser.payDay) || 1)),
-        assetArchive: Array.isArray(localUser.assetArchive) ? localUser.assetArchive : [],
-        strategyMode: localUser.strategyMode || null, categories: localUser.categories || [],
-        recurring: localUser.recurring || [], goals: localUser.goals || [],
-        confirmed: !!localUser.confirmed, stage: localUser.stage || "dashboard",
-      }, localTx);
-      if (!migrated) throw new Error("Migrasi belum tersimpan.");
-      setMigrationOk(true);
-    } catch (error) {
-      setMigrationError(error?.message || "Data lokal untuk username ini tidak ditemukan di browser ini.");
+      setImportError(friendlyErrorMessage(error, error?.message || "Impor gagal disimpan. Periksa koneksi dan konfigurasi database, lalu coba lagi."));
     }
   };
 
@@ -3494,18 +3525,6 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
             </button>
           </div>
 
-          <div className="card p-6">
-            <p className="muted text-xs uppercase tracking-wide mb-3">Migrasi dari browser lama</p>
-            <p className="muted text-sm">
-              Memindahkan akun dan transaksi lokal dengan username <b>{user.username}</b> ke Supabase.
-              Jalankan hanya jika data Supabase masih kosong.
-            </p>
-            <button className="btn-ghost flex items-center gap-2 mt-3" onClick={migrateLocal}>
-              <Upload size={15} /> Migrasikan Data Lokal
-            </button>
-            {migrationError && <p className="text-sm mt-2" style={{ color: "var(--rose)" }}>{migrationError}</p>}
-            {migrationOk && <p className="text-sm mt-2" style={{ color: "var(--teal)" }}>Data lokal berhasil dimigrasikan.</p>}
-          </div>
         </div>
 
         <div className="card p-6">
@@ -3578,12 +3597,27 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
         <div className="card p-6">
           <p className="muted text-xs uppercase tracking-wide mb-3">Impor Data</p>
           <p className="muted text-sm mb-3">
-            Tempel isi file backup JSON (dari fitur Ekspor di atas) untuk memulihkan alokasi & riwayat transaksi.
+            Pilih file backup JSON atau tempel isinya untuk memulihkan alokasi & riwayat transaksi.
             Ini akan menimpa data alokasi & transaksi akun ini — login tidak berubah.
           </p>
+          <input
+            ref={backupFileInputRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={loadBackupFile}
+            style={{ display: "none" }}
+          />
+          <button
+            type="button"
+            className="btn-ghost flex items-center gap-2 mb-3"
+            onClick={() => backupFileInputRef.current?.click()}
+          >
+            <Upload size={15} /> Pilih File Backup JSON
+          </button>
+          {importFileName && <p className="muted text-xs mb-2">File dipilih: {importFileName}</p>}
           <textarea
             value={importText}
-            onChange={(e) => setImportText(e.target.value)}
+            onChange={(e) => { setImportText(e.target.value); setImportFileName(""); }}
             placeholder='{"user": {...}, "transactions": [...]}'
             rows={4}
             style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text)", padding: 10, fontFamily: "monospace", fontSize: 12 }}
@@ -4630,7 +4664,7 @@ export default function App() {
       amount: Number(item.amount),
   });
 
-  const enqueueTransactionSave = (userId, operation) => {
+  const enqueueTransactionSave = (userId, operation, { notify = true } = {}) => {
     const save = txSaveQueueRef.current.then(async () => {
       const { error } = await operation();
       if (error) throw error;
@@ -4638,21 +4672,24 @@ export default function App() {
     txSaveQueueRef.current = save.catch(() => {});
     return save.catch(async (error) => {
       console.error("transaction save failed", error);
-      setAuthError(friendlyErrorMessage(error, "Perubahan transaksi belum tersimpan. Periksa koneksi lalu coba lagi."));
+      if (notify) {
+        setAuthError(friendlyErrorMessage(error, "Perubahan transaksi belum tersimpan. Periksa koneksi lalu coba lagi."));
+      }
       try {
         await loadAccount(userId);
       } catch (reloadError) {
         console.error("Account reload after transaction failure failed", reloadError);
-        setAuthError("Data akun belum dapat dimuat ulang. Muat ulang halaman sebelum melanjutkan.");
+        if (notify) setAuthError("Data akun belum dapat dimuat ulang. Muat ulang halaman sebelum melanjutkan.");
       }
       throw error;
     });
   };
 
-  const replaceTransactions = (userId, tx) => enqueueTransactionSave(userId, () =>
+  const replaceTransactions = (userId, tx, notify = true) => enqueueTransactionSave(userId, () =>
     supabase.rpc("replace_my_transactions", {
       replacement_rows: tx.map((item) => transactionRow(userId, item)),
-    })
+    }),
+    { notify }
   );
 
   const updateUser = (patch) => {
@@ -4703,7 +4740,9 @@ export default function App() {
     if (error) {
       console.error("Registration failed", error);
       setBusy(false);
-      setAuthError(friendlyErrorMessage(error, "Akun belum dapat dibuat. Periksa data dan coba lagi."));
+      setAuthError(error.code === "23505"
+        ? "Username atau email sudah digunakan. Coba gunakan username atau email lain."
+        : friendlyErrorMessage(error, "Akun belum dapat dibuat. Periksa data dan coba lagi."));
       return;
     }
     if (authData.user?.identities?.length === 0) {
@@ -4774,8 +4813,6 @@ export default function App() {
   };
 
   const handleImportData = async (userPatch, importedTransactions) => {
-    const profileSaved = await updateUser(userPatch);
-    if (!profileSaved) throw new Error("Profil backup belum tersimpan. Transaksi lama tidak diubah.");
     const normalizedTransactions = importedTransactions.map((transaction) => ({
       ...transaction,
       id: String(transaction.id),
@@ -4789,9 +4826,25 @@ export default function App() {
       borrowedAmount: transaction.borrowedAmount == null ? null : Number(transaction.borrowedAmount),
     }));
     try {
-      await replaceTransactions(user.id, normalizedTransactions);
+      await replaceTransactions(user.id, normalizedTransactions, false);
     } catch (error) {
-      throw new Error("Profil berhasil diperbarui, tetapi transaksi gagal diganti. Transaksi lama tetap dipertahankan.");
+      if (error?.code === "23505") {
+        throw new Error("ID transaksi pada backup sudah digunakan oleh data lain. Pastikan backup berasal dari akun ini atau hapus data duplikat dari file sebelum mengimpor.");
+      }
+      throw new Error(friendlyErrorMessage(
+        error,
+        `Transaksi backup gagal disimpan (${error?.message || "kesalahan database"}). Data akun sebelumnya tetap digunakan.`
+      ));
+    }
+    const profileSaved = await updateUser(userPatch);
+    if (!profileSaved) {
+      try {
+        await replaceTransactions(user.id, transactions, false);
+      } catch (rollbackError) {
+        console.error("Backup transaction rollback failed", rollbackError);
+        throw new Error("Profil backup gagal disimpan dan pemulihan transaksi lama juga gagal. Hubungi dukungan sebelum mengubah data lagi.");
+      }
+      throw new Error("Profil backup belum tersimpan. Transaksi lama telah dipulihkan.");
     }
     setTransactions(normalizedTransactions.sort((a, b) => a.date.localeCompare(b.date)));
     return true;
@@ -5054,7 +5107,6 @@ export default function App() {
           onLogin={handleLogin}
           onRegister={handleRegister}
           onForgotPassword={() => setShowForgotPassword(true)}
-          error={authError}
           notice={authNotice}
           busy={busy}
         />
@@ -5169,7 +5221,6 @@ export default function App() {
           onToggleTheme={toggleTheme}
           onUpdateProfile={(patch) => updateUser(patch)}
           onImport={handleImportData}
-          onMigrateLocal={handleImportData}
           onBack={() => setPage("dashboard")}
           onOpenReset={() => setShowResetAccount(true)}
           onOpenDelete={() => setShowDeleteAccount(true)}
@@ -5224,9 +5275,9 @@ export default function App() {
   return (
     <div className={"mmp-app" + (theme === "light" ? " theme-light" : "")}>
       <style>{STYLE}</style>
-      {user && authError && (
-        <div className="card p-3 mx-auto mt-3 flex items-center justify-between gap-3" role="alert" style={{ maxWidth: 760, borderColor: "var(--rose)", color: "var(--rose)" }}>
-          <span className="text-sm flex items-center gap-2"><AlertCircle size={15} /> {authError}</span>
+      {authError && (
+        <div role="alert" className="card p-3 flex items-start justify-between gap-3" style={{ position: "fixed", top: "max(12px, env(safe-area-inset-top))", left: "50%", transform: "translateX(-50%)", width: "min(760px, calc(100vw - 24px))", zIndex: 2000, borderColor: "var(--rose)", color: "var(--rose)", boxShadow: "0 12px 36px rgba(0,0,0,.35)" }}>
+          <span className="text-sm flex items-start gap-2"><AlertCircle size={15} style={{ flex: "0 0 auto", marginTop: 2 }} /> {authError}</span>
           <button className="icon-btn" aria-label="Tutup pesan error" onClick={() => setAuthError("")}><X size={15} /></button>
         </div>
       )}
