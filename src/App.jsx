@@ -1631,7 +1631,7 @@ function AppFooter() {
       >
         @naufalnurf__
       </a>
-      <span className="muted"> · v1.3.5/span>
+      <span className="muted"> · v1.3.5</span>
     </footer>
   );
 }
