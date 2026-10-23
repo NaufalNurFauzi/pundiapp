@@ -49,7 +49,8 @@ transaksi.
    dan [`supabase/feedback.sql`](./supabase/feedback.sql).
    Jika project Supabase sudah disiapkan sebelumnya, jalankan ulang `schema.sql`
    untuk memperbarui pemeriksaan email serta menambahkan penyimpanan transaksi
-   atomik dan kolom keterkaitan transaksi dengan tujuan.
+   atomik, kolom keterkaitan transaksi dengan tujuan, serta sumber dan nominal
+   pinjaman antar alokasi.
 3. Salin `.env.example` menjadi `.env.local`.
 4. Isi `VITE_SUPABASE_URL` dan `VITE_SUPABASE_ANON_KEY` dari **Project Settings →
    API**. Gunakan key `anon`/publishable, bukan `service_role`. Isi

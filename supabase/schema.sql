@@ -31,11 +31,18 @@ create table if not exists public.transactions (
   amount numeric not null check (amount >= 0),
   direct_asset boolean not null default false,
   goal_id text,
+  borrowed_from_category_id text,
+  borrowed_amount numeric not null default 0 check (borrowed_amount >= 0 and borrowed_amount <= amount),
   created_at timestamptz not null default now()
 );
 
 alter table public.transactions add column if not exists direct_asset boolean not null default false;
 alter table public.transactions add column if not exists goal_id text;
+alter table public.transactions add column if not exists borrowed_from_category_id text;
+alter table public.transactions add column if not exists borrowed_amount numeric not null default 0 check (borrowed_amount >= 0 and borrowed_amount <= amount);
+update public.transactions
+set borrowed_amount = amount
+where borrowed_from_category_id is not null and borrowed_amount = 0;
 alter table public.profiles add column if not exists monthly_income_prompt_dismissed jsonb not null default '{}'::jsonb;
 alter table public.profiles add column if not exists salary_periods jsonb not null default '[]'::jsonb;
 alter table public.profiles add column if not exists pay_day integer not null default 1;
@@ -119,7 +126,7 @@ begin
   delete from public.transactions where user_id = current_user_id;
 
   insert into public.transactions (
-    id, user_id, date, type, category_id, sub_id, direct_asset, goal_id, note, amount
+    id, user_id, date, type, category_id, sub_id, direct_asset, goal_id, borrowed_from_category_id, borrowed_amount, note, amount
   )
   select
     row_data.id,
@@ -130,6 +137,8 @@ begin
     row_data.sub_id,
     coalesce(row_data.direct_asset, false),
     row_data.goal_id,
+    row_data.borrowed_from_category_id,
+    coalesce(row_data.borrowed_amount, 0),
     row_data.note,
     row_data.amount
   from jsonb_to_recordset(replacement_rows) as row_data(
@@ -140,6 +149,8 @@ begin
     sub_id text,
     direct_asset boolean,
     goal_id text,
+    borrowed_from_category_id text,
+    borrowed_amount numeric,
     note text,
     amount numeric
   );

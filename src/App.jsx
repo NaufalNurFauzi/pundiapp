@@ -116,6 +116,128 @@ function periodCarryoverAmount(period, categoryId, subId = undefined) {
     .filter((item) => item.categoryId === categoryId && (subId === undefined || (item.subId || null) === (subId || null)))
     .reduce((sum, item) => sum + Number(item.amount || 0), 0);
 }
+function periodAllocationAdjustment(period, categoryId) {
+  return (period.allocationRepayments || []).reduce((sum, repayment) => {
+    if (repayment.fromCategoryId === categoryId) return sum - Number(repayment.amount || 0);
+    if (repayment.toCategoryId === categoryId) return sum + Number(repayment.amount || 0);
+    return sum;
+  }, 0);
+}
+function transactionBorrowedAmount(transaction) {
+  if (!transaction.borrowedFromCategoryId) return 0;
+  if (transaction.borrowedAmount !== null &&
+      transaction.borrowedAmount !== undefined &&
+      Number.isFinite(Number(transaction.borrowedAmount))) {
+    return Math.max(0, Math.min(Number(transaction.amount || 0), Number(transaction.borrowedAmount)));
+  }
+  return Number(transaction.amount || 0);
+}
+function allocationBudgetSpent(transactions, categoryId) {
+  return transactions.filter((transaction) => isExpenseTx(transaction) && !transaction.directAsset)
+    .reduce((sum, transaction) => {
+      const borrowedAmount = transactionBorrowedAmount(transaction);
+      if (transaction.categoryId === categoryId) {
+        return sum + Number(transaction.amount || 0) - borrowedAmount;
+      }
+      if (transaction.borrowedFromCategoryId === categoryId) {
+        return sum + borrowedAmount;
+      }
+      return sum;
+    }, 0);
+}
+function allocationRemaining(user, transactions, period, categoryId, excludedTransactionId = null) {
+  const category = (period.categories || user.categories).find((item) => item.id === categoryId)
+    || user.categories.find((item) => item.id === categoryId);
+  if (!category) return 0;
+  const periodTransactions = transactionsForPeriod(transactions, period, getSalaryPeriods(user));
+  const globalTopups = periodTransactions.filter((transaction) => isTopupTx(transaction) && !transaction.categoryId)
+    .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+  const categoryTopups = periodTransactions.filter((transaction) => isTopupTx(transaction) && transaction.categoryId === categoryId)
+    .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+  const allocated = (Number(period.amount || 0) + globalTopups) * category.percent / 100 +
+    periodAllocationAdjustment(period, categoryId) +
+    categoryTopups +
+    periodCarryoverAmount(period, categoryId);
+  const spendingTransactions = excludedTransactionId
+    ? periodTransactions.filter((transaction) => transaction.id !== excludedTransactionId)
+    : periodTransactions;
+  return allocated - allocationBudgetSpent(spendingTransactions, categoryId);
+}
+function allocationLoanKey(fromCategoryId, toCategoryId) {
+  return JSON.stringify([fromCategoryId, toCategoryId]);
+}
+function getOutstandingAllocationLoans(user, transactions, beforeDate = null) {
+  const events = [];
+  transactions.filter((transaction) =>
+    isExpenseTx(transaction) &&
+    transaction.borrowedFromCategoryId &&
+    transaction.categoryId &&
+    transaction.categoryId !== transaction.borrowedFromCategoryId &&
+    (!beforeDate || transaction.date < beforeDate)
+  ).forEach((transaction) => {
+    const borrowedAmount = transactionBorrowedAmount(transaction);
+    if (borrowedAmount <= 0) return;
+    const key = allocationLoanKey(transaction.categoryId, transaction.borrowedFromCategoryId);
+    events.push({ key, date: transaction.date, amount: borrowedAmount, type: "loan" });
+  });
+  getSalaryPeriods(user).filter((period) => !beforeDate || period.startDate < beforeDate)
+    .forEach((period) => (period.allocationRepayments || []).forEach((repayment) => {
+      const key = allocationLoanKey(repayment.fromCategoryId, repayment.toCategoryId);
+      events.push({ key, date: period.startDate, amount: Number(repayment.amount || 0), type: "repayment" });
+    }));
+  events.sort((a, b) => a.date.localeCompare(b.date) ||
+    Number(a.type !== "repayment") - Number(b.type !== "repayment"));
+  const balances = new Map();
+  events.forEach((event) => {
+    const amount = balances.get(event.key) || 0;
+    balances.set(event.key, event.type === "loan"
+      ? amount + event.amount
+      : Math.max(0, amount - event.amount));
+  });
+  return [...balances.entries()].filter(([, amount]) => amount > 0).map(([key, amount]) => {
+    const [fromCategoryId, toCategoryId] = JSON.parse(key);
+    return { key, fromCategoryId, toCategoryId, amount };
+  });
+}
+function allocationCategoryName(user, categoryId) {
+  const currentCategory = user.categories.find((category) => category.id === categoryId);
+  if (currentCategory) return currentCategory.name;
+  const historicalCategory = getSalaryPeriods(user)
+    .flatMap((period) => period.categories || [])
+    .find((category) => category.id === categoryId);
+  return historicalCategory?.name || "Alokasi dihapus";
+}
+function AllocationLoanNote({ user, transactions, categoryId }) {
+  const loans = new Map();
+  transactions.filter((transaction) =>
+    isExpenseTx(transaction) &&
+    !transaction.directAsset &&
+    transactionBorrowedAmount(transaction) > 0 &&
+    (transaction.categoryId === categoryId || transaction.borrowedFromCategoryId === categoryId)
+  ).forEach((transaction) => {
+    const isBorrowed = transaction.categoryId === categoryId;
+    const relatedCategoryId = isBorrowed ? transaction.borrowedFromCategoryId : transaction.categoryId;
+    const key = `${isBorrowed ? "borrowed" : "lent"}:${relatedCategoryId}`;
+    const summary = loans.get(key) || {
+      type: isBorrowed ? "borrowed" : "lent",
+      categoryId: relatedCategoryId,
+      amount: 0,
+    };
+    summary.amount += transactionBorrowedAmount(transaction);
+    loans.set(key, summary);
+  });
+  if (!loans.size) return null;
+  return (
+    <div className="flex flex-col gap-1 mt-2">
+      {[...loans.values()].map((loan) => (
+        <p key={`${loan.type}:${loan.categoryId}`} className="text-xs" style={{ color: "var(--gold)" }}>
+          {loan.type === "borrowed" ? "Pinjam" : "Dipinjamkan"} {rupiah(loan.amount)}{" "}
+          {loan.type === "borrowed" ? "dari" : "ke"} {allocationCategoryName(user, loan.categoryId)}
+        </p>
+      ))}
+    </div>
+  );
+}
 function getPeriodCashRemainder(user, transactions, period, beforeDate = null) {
   const periods = getSalaryPeriods(user);
   const periodTransactions = transactionsForPeriod(transactions, period, periods)
@@ -250,15 +372,18 @@ function triggerDownload(filename, content, mime) {
   URL.revokeObjectURL(url);
 }
 function transactionsToCsv(user, transactions) {
-  const rows = [["Tanggal", "Tipe", "Kategori", "Sub-alokasi", "Catatan", "Nominal"]];
+  const rows = [["Tanggal", "Tipe", "Kategori", "Sub-alokasi", "Sumber pinjaman", "Nominal pinjaman", "Catatan", "Nominal"]];
   [...transactions].sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((t) => {
     const cat = user.categories.find((c) => c.id === t.categoryId);
     const sub = cat?.subs.find((s) => s.id === t.subId);
+    const fundingCategory = user.categories.find((c) => c.id === t.borrowedFromCategoryId);
     rows.push([
       t.date,
       isAssetTopupTx(t) ? "Saldo Aset" : isTopupTx(t) ? "Tambahan Dana" : "Pengeluaran",
       cat ? cat.name : "Seluruh Alokasi",
       sub ? sub.name : "",
+      fundingCategory ? fundingCategory.name : "",
+      transactionBorrowedAmount(t),
       (t.note || "").replace(/"/g, '""'),
       t.amount,
     ]);
@@ -1506,7 +1631,7 @@ function AppFooter() {
       >
         @naufalnurf__
       </a>
-      <span className="muted"> · v1.3.3</span>
+      <span className="muted"> · v1.3.5/span>
     </footer>
   );
 }
@@ -1514,6 +1639,7 @@ function AppFooter() {
 function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout, onEditAlloc, onAddMoney, onViewHistory, onOpenSettings, onOpenGoals, onOpenCalculator, onDismissIncomeReminder }) {
   const periods = getSalaryPeriods(user);
   const activePeriod = getActivePeriod(user);
+  const openAllocationLoans = getOutstandingAllocationLoans(user, transactions);
   const periodLabel = `${dateLabel(activePeriod.startDate)} - ${dateLabel(getPeriodEnd(activePeriod, periods) || todayStr())}`;
   const reminderKey = paydayReminderDismissalKey(user);
   const needsNewMonthIncome = accountLoaded && isPaydayReminderDue(user) && !user.monthlyIncomePromptDismissed?.[reminderKey];
@@ -1538,7 +1664,7 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
   const totalEquity = balance + totalAssets;
   const prevCarry = balance - thisMonthNet;
 
-  const spentFor = (catId) => expenses.filter((t) => t.categoryId === catId && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
+  const spentFor = (catId) => allocationBudgetSpent(expenses, catId);
   const withdrawFor = (catId) => monthTx.filter((t) => t.categoryId === catId && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const assetDepositFor = (catId) => monthTx.filter((t) => t.categoryId === catId && isAssetMonthlyDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const directTopupFor = (catId) => topups.filter((t) => t.categoryId === catId && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
@@ -1614,6 +1740,21 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
           </div>
         </div>
 
+        {openAllocationLoans.length > 0 && (
+          <div className="card p-5">
+            <p className="muted text-xs uppercase tracking-wide mb-2">Pinjaman antar alokasi</p>
+            <div className="flex flex-col gap-2">
+              {openAllocationLoans.map((loan) => (
+                <div key={loan.key} className="flex justify-between gap-3 text-sm">
+                  <span>{allocationCategoryName(user, loan.fromCategoryId)} meminjam dari {allocationCategoryName(user, loan.toCategoryId)}</span>
+                  <span className="tabular" style={{ color: "var(--gold)" }}>{rupiah(loan.amount)}</span>
+                </div>
+              ))}
+            </div>
+            <p className="muted text-xs mt-2">Kamu bisa menyesuaikan alokasi dan mengurangi pinjaman saat mencatat gaji periode berikutnya.</p>
+          </div>
+        )}
+
         <div className="grid gap-6" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
           <div className="card p-6 anim-pop stagger-1">
             <AllocationRing categories={user.categories} centerLabel="Total Income" centerValue={effectiveIncome} />
@@ -1628,7 +1769,7 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
           <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
             {user.categories.map((c, i) => {
                 const carryover = periodCarryoverAmount(activePeriod, c.id);
-                const allocated = effectiveIncome * c.percent / 100 + directTopupFor(c.id) + subTopupFor(c.id) + carryover;
+                const allocated = effectiveIncome * c.percent / 100 + periodAllocationAdjustment(activePeriod, c.id) + directTopupFor(c.id) + subTopupFor(c.id) + carryover;
               const spent = c.isAsset ? assetDepositFor(c.id) - withdrawFor(c.id) : spentFor(c.id);
               const pct = allocated > 0 ? (spent / allocated) * 100 : 0;
               return (
@@ -1648,6 +1789,9 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
                   </div>
                   <p className="muted text-xs mb-1">{fmtPercent(c.percent)}% dari income</p>
                   {carryover > 0 && <p className="text-xs mb-1" style={{ color: "var(--teal)" }}>+{rupiah(carryover)} saldo periode lalu</p>}
+                  {!c.isAsset && (
+                    <AllocationLoanNote user={user} transactions={monthTx} categoryId={c.id} />
+                  )}
                   {c.isAsset ? (
                     <>
                       <p className="muted text-xs">Saldo total aset</p>
@@ -1717,6 +1861,9 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const [note, setNote] = useState("");
   const [date, setDate] = useState(todayStr());
   const [formError, setFormError] = useState("");
+  const [borrowPromptStage, setBorrowPromptStage] = useState("");
+  const [borrowPromptMessage, setBorrowPromptMessage] = useState("");
+  const [borrowedFromCategoryId, setBorrowedFromCategoryId] = useState("");
   const [assetMode, setAssetMode] = useState("setor"); // setor | tarik
   const [search, setSearch] = useState("");
   const [editingTx, setEditingTx] = useState(null);
@@ -1738,18 +1885,18 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const effectiveIncome = income + globalTopup;
   const directTopup = allMonthTx.filter((t) => isTopupTx(t) && t.categoryId === cat.id && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const subTopupTotal = allMonthTx.filter((t) => isTopupTx(t) && t.categoryId === cat.id && t.subId).reduce((s, t) => s + Number(t.amount), 0);
-  const baseAllocated = effectiveIncome * cat.percent / 100;
+  const baseAllocated = effectiveIncome * cat.percent / 100 + periodAllocationAdjustment(activePeriod, cat.id);
   const categoryCarryover = periodCarryoverAmount(activePeriod, cat.id);
   const allocated = baseAllocated + directTopup + subTopupTotal + categoryCarryover;
   const monthTx = allMonthTx.filter((t) => t.categoryId === cat.id);
   const deposited = monthTx.filter(isAssetMonthlyDepositTx).reduce((s, t) => s + Number(t.amount), 0);
-  const spent = isAsset ? deposited : monthTx.filter(isExpenseTx).reduce((s, t) => s + Number(t.amount), 0);
+  const spent = isAsset ? deposited : allocationBudgetSpent(allMonthTx, cat.id);
   const withdrawn = monthTx.filter(isWithdrawTx).reduce((s, t) => s + Number(t.amount), 0);
   const netAssetMovement = isAsset ? deposited - withdrawn : spent;
   const remaining = allocated - (isAsset ? netAssetMovement : spent);
   const catPct = allocated > 0 ? ((isAsset ? netAssetMovement : spent) / allocated) * 100 : 0;
   const catSaldo = assetBalance(transactions, cat.id, undefined, user);
-  const history = allMonthTx.filter((t) => t.categoryId === cat.id).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const history = allMonthTx.filter((t) => t.categoryId === cat.id || t.borrowedFromCategoryId === cat.id).sort((a, b) => (a.date < b.date ? 1 : -1));
   const filteredHistory = search.trim()
     ? history.filter((t) => {
         const subName = cat.subs.find((s) => s.id === t.subId)?.name || "";
@@ -1759,7 +1906,11 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
     : history;
   const recurring = (user.recurring || []).filter((r) => r.categoryId === cat.id);
 
-  const spentForSub = (sid) => monthTx.filter((t) => t.subId === sid && (isAsset ? isAssetMonthlyDepositTx(t) : isExpenseTx(t)) && (isAsset || !t.directAsset)).reduce((s, t) => s + Number(t.amount), 0);
+  const spentForSub = (sid) => monthTx.filter((t) =>
+    t.subId === sid &&
+    (isAsset ? isAssetMonthlyDepositTx(t) : isExpenseTx(t)) &&
+    (isAsset || !t.directAsset)
+  ).reduce((sum, transaction) => sum + Number(transaction.amount || 0) - (isAsset ? 0 : transactionBorrowedAmount(transaction)), 0);
   const withdrawnForSub = (sid) => monthTx.filter((t) => t.subId === sid && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const topupForSub = (sid) => monthTx.filter((t) => t.subId === sid && isTopupTx(t)).reduce((s, t) => s + Number(t.amount), 0);
 
@@ -1776,15 +1927,86 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
     if (amt > remaining) return `Sisa alokasi "${cat.name}" tidak mencukupi. Sisa saat ini ${rupiah(remaining)}.`;
     return "";
   };
+  const sourceCategory = user.categories.find((category) => category.id === borrowedFromCategoryId && !category.isAsset);
+  const requiredBorrowAmount = Math.max(0, Number(amount || 0) - Math.max(0, remaining));
+  const sourceRemaining = sourceCategory
+    ? allocationRemaining(user, transactions, activePeriod, sourceCategory.id)
+    : 0;
+  const relevantLoans = getOutstandingAllocationLoans(user, transactions)
+    .filter((loan) => loan.fromCategoryId === cat.id || loan.toCategoryId === cat.id);
 
   const submitSetor = () => {
     const amt = Number(amount);
     if (!(amt > 0)) { setFormError("Masukkan jumlah yang valid."); return; }
+    if (amt > remaining) {
+      const eligibleSources = user.categories.filter((category) => !category.isAsset && category.id !== cat.id);
+      if (eligibleSources.length) {
+        setBorrowPromptMessage(`Sisa alokasi "${cat.name}" ${rupiah(Math.max(0, remaining))} tidak cukup.`);
+        setBorrowedFromCategoryId(eligibleSources[0].id);
+        setBorrowPromptStage("confirm");
+      } else {
+        setFormError(`Sisa alokasi "${cat.name}" tidak mencukupi. Sisa saat ini ${rupiah(remaining)}.`);
+      }
+      return;
+    }
     const err = checkBalance(amt, subId);
     if (err) { setFormError(err); return; }
     setFormError("");
-    onAddTx({ id: uid(), type: "expense", categoryId: cat.id, subId: subId || null, amount: amt, note: note.trim(), date });
+    onAddTx({
+      id: uid(),
+      type: "expense",
+      categoryId: cat.id,
+      subId: subId || null,
+      amount: amt,
+      note: note.trim(),
+      date,
+      borrowedFromCategoryId: null,
+      borrowedAmount: 0,
+    });
     setAmount(""); setNote(""); setSubId("");
+  };
+  const continueBorrow = () => {
+    setBorrowPromptStage("source");
+    setFormError("");
+  };
+  const cancelBorrow = () => {
+    setBorrowPromptStage("");
+    setBorrowPromptMessage("");
+    setBorrowedFromCategoryId("");
+  };
+  const submitBorrow = () => {
+    const amt = Number(amount);
+    if (!(amt > 0)) {
+      setFormError("Masukkan jumlah yang valid.");
+      setBorrowPromptStage("");
+      return;
+    }
+    if (!sourceCategory || sourceCategory.id === cat.id) {
+      setFormError("Pilih alokasi sumber pinjaman yang valid.");
+      return;
+    }
+    const borrowedAmount = Math.max(0, amt - Math.max(0, remaining));
+    if (borrowedAmount <= 0) {
+      setFormError("Pinjaman tidak diperlukan karena sisa alokasi kategori ini masih cukup.");
+      return;
+    }
+    if (borrowedAmount > sourceRemaining) {
+      setFormError(`Pinjaman yang dibutuhkan ${rupiah(borrowedAmount)}, tetapi sisa alokasi "${sourceCategory.name}" hanya ${rupiah(sourceRemaining)}.`);
+      return;
+    }
+    onAddTx({
+      id: uid(),
+      type: "expense",
+      categoryId: cat.id,
+      subId: subId || null,
+      amount: amt,
+      note: note.trim(),
+      date,
+      borrowedFromCategoryId: sourceCategory.id,
+      borrowedAmount,
+    });
+    setAmount(""); setNote(""); setSubId("");
+    cancelBorrow();
   };
   const submitTarik = () => {
     const amt = Number(amount);
@@ -1799,7 +2021,21 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
 
   const recordRecurring = (r) => {
     const err = checkBalance(r.amount, r.subId);
-    if (err) { setRecError(err); return; }
+    if (err) {
+      if (r.amount > remaining && user.categories.some((category) => !category.isAsset && category.id !== cat.id)) {
+        setAmount(String(r.amount));
+        setNote(r.name);
+        setSubId(r.subId || "");
+        setDate(todayStr());
+        setBorrowPromptMessage(`Sisa alokasi "${cat.name}" ${rupiah(Math.max(0, remaining))} tidak cukup.`);
+        setBorrowedFromCategoryId(user.categories.find((category) => !category.isAsset && category.id !== cat.id).id);
+        setBorrowPromptStage("confirm");
+        setRecError("");
+      } else {
+        setRecError(err);
+      }
+      return;
+    }
     setRecError("");
     onAddTx({ id: uid(), type: "expense", categoryId: cat.id, subId: r.subId || null, amount: r.amount, note: r.name, date: todayStr() });
   };
@@ -1858,7 +2094,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
                   {categoryCarryover > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--teal)" }}>termasuk {rupiah(categoryCarryover)} saldo periode lalu</p>}
                 </div>
                 <div>
-                  <p className="muted text-xs uppercase tracking-wide">Terpakai periode ini</p>
+                  <p className="muted text-xs uppercase tracking-wide">Terpakai dari alokasi</p>
                   <p className="tabular" style={{ fontWeight: 700, color: "var(--rose)" }}>{rupiah(spent)}</p>
                 </div>
                 <div>
@@ -1873,6 +2109,33 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
             </>
           )}
         </div>
+
+        {!isAsset && (
+          <div className="card p-4">
+            <p className="muted text-xs uppercase tracking-wide mb-1">Keterangan pinjaman alokasi · periode ini</p>
+            <AllocationLoanNote user={user} transactions={allMonthTx} categoryId={cat.id} />
+            {!allMonthTx.some((transaction) =>
+              transaction.borrowedFromCategoryId === cat.id || transaction.categoryId === cat.id && transaction.borrowedFromCategoryId
+            ) && <p className="muted text-sm">Tidak ada transaksi pinjaman untuk alokasi ini.</p>}
+          </div>
+        )}
+
+        {relevantLoans.length > 0 && (
+          <div className="card p-5">
+            <p className="muted text-xs uppercase tracking-wide mb-2">Pinjaman alokasi belum disesuaikan</p>
+            <div className="flex flex-col gap-2">
+              {relevantLoans.map((loan) => (
+                <div key={loan.key} className="flex justify-between gap-3 text-sm">
+                  <span>
+                    {loan.fromCategoryId === cat.id ? "Meminjam dari" : "Dipinjam oleh"}{" "}
+                    {allocationCategoryName(user, loan.fromCategoryId === cat.id ? loan.toCategoryId : loan.fromCategoryId)}
+                  </span>
+                  <span className="tabular" style={{ color: "var(--gold)" }}>{rupiah(loan.amount)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {cat.subs.length > 0 && (
           <div className="card p-6">
@@ -2027,19 +2290,34 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
           <div className="flex flex-col gap-2">
             {filteredHistory.length === 0 && <p className="muted text-sm">Tidak ada transaksi yang cocok.</p>}
             {filteredHistory.slice(0, expandAllTx ? filteredHistory.length : 5).map((t, hi) => {
-              const subName = cat.subs.find((s) => s.id === t.subId)?.name;
+              const transactionCategory = user.categories.find((category) => category.id === t.categoryId);
+              const subName = transactionCategory?.subs.find((s) => s.id === t.subId)?.name;
               const topup = isTopupTx(t);
               const withdraw = isWithdrawTx(t);
               const positive = topup || (isAsset && !withdraw); // setor & topup are "adds", tarik is "reduces"
+              const displayAmount = t.borrowedFromCategoryId === cat.id && t.categoryId !== cat.id
+                ? transactionBorrowedAmount(t)
+                : t.amount;
               const label = withdraw ? "Tarik" : topup ? "Tambahan dana" : isAssetOpeningTx(t) ? "Saldo awal aset" : isAsset ? "Setor" : null;
               return (
                 <div key={t.id} className="card2 p-3 flex items-center justify-between anim-fade-up" style={{ animationDelay: `${Math.min(hi, 8) * 40}ms` }}>
                   <div>
-                    <p className="text-sm">{t.note || subName || label || cat.name}</p>
-                    <p className="muted text-xs">{t.date}{subName ? ` · ${subName}` : ""}{label ? ` · ${label}` : ""}</p>
+                    <p className="text-sm">
+                      {t.note || subName || (t.borrowedFromCategoryId === cat.id
+                        ? allocationCategoryName(user, t.categoryId)
+                        : label || cat.name)}
+                    </p>
+                    <p className="muted text-xs">
+                      {t.date}{subName ? ` · ${subName}` : ""}{label ? ` · ${label}` : ""}
+                      {t.borrowedFromCategoryId && t.categoryId === cat.id
+                        ? ` · Pinjam ${rupiah(transactionBorrowedAmount(t))} dari ${allocationCategoryName(user, t.borrowedFromCategoryId)}`
+                        : t.borrowedFromCategoryId === cat.id
+                          ? ` · Dibiayai ${rupiah(transactionBorrowedAmount(t))} untuk ${allocationCategoryName(user, t.categoryId)}`
+                          : ""}
+                    </p>
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className="transaction-amount tabular" style={{ color: positive ? "var(--teal)" : "var(--rose)" }}>{positive ? "+" : "-"}{rupiah(t.amount)}</span>
+                    <span className="transaction-amount tabular" style={{ color: positive ? "var(--teal)" : "var(--rose)" }}>{positive ? "+" : "-"}{rupiah(displayAmount)}</span>
                     <button className="icon-btn" onClick={() => setEditingTx(t)}><Pencil size={14} className="muted" /></button>
                     <button className="icon-btn" onClick={() => { if (window.confirm("Hapus transaksi ini?")) onDeleteTx(t.id); }}><X size={15} className="muted" /></button>
                   </div>
@@ -2063,9 +2341,78 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
         <EditTransactionModal
           tx={editingTx}
           cat={cat}
+          categories={user.categories}
+          user={user}
+          transactions={transactions}
+          period={activePeriod}
           onClose={() => setEditingTx(null)}
           onSave={(updated) => { onUpdateTx(updated); setEditingTx(null); }}
         />
+      )}
+      {borrowPromptStage && (
+        <div className="modal-overlay anim-fade" onClick={cancelBorrow}>
+          <div className="card p-6 anim-pop" style={{ maxWidth: 440, width: "100%" }} onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-center gap-2 mb-2">
+              <AlertCircle size={18} color="var(--gold)" />
+              <h2 className="display" style={{ fontSize: 18, fontWeight: 700 }}>
+                {borrowPromptStage === "confirm" ? "Saldo alokasi tidak cukup" : "Pilih alokasi sumber"}
+              </h2>
+            </div>
+            {borrowPromptStage === "confirm" ? (
+              <>
+                <p className="muted text-sm mb-4">
+                  {borrowPromptMessage} Pengeluaran ini {rupiah(Number(amount) || 0)}.
+                  Pinjaman yang dibutuhkan {rupiah(requiredBorrowAmount)}. Apakah kamu ingin meminjam dari alokasi lain?
+                </p>
+                <div className="flex gap-2">
+                  <button className="btn-ghost flex-1" onClick={cancelBorrow}>Tidak, batal</button>
+                  <button className="btn-primary flex-1" onClick={continueBorrow}>Ya, pilih alokasi</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="muted text-sm mb-4">
+                  Pengeluaran tetap dicatat sebagai {cat.name}; saldo kategori yang dipilih akan digunakan sebagai sumber dana.
+                </p>
+                <div className="flex flex-col gap-3">
+                  <Field label="Pinjam dari alokasi">
+                    <select
+                      value={borrowedFromCategoryId}
+                      onChange={(event) => setBorrowedFromCategoryId(event.target.value)}
+                    >
+                      {user.categories.filter((category) => !category.isAsset && category.id !== cat.id).map((category) => (
+                        <option key={category.id} value={category.id}>
+                          {category.name} · sisa {rupiah(allocationRemaining(user, transactions, activePeriod, category.id))}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  {sourceCategory && (
+                    <p className="muted text-xs">
+                      Pinjaman dibutuhkan {rupiah(requiredBorrowAmount)} · sisa {sourceCategory.name}: {rupiah(sourceRemaining)}
+                      {requiredBorrowAmount > sourceRemaining && <span style={{ color: "var(--rose)" }}> — saldo sumber tidak cukup</span>}
+                    </p>
+                  )}
+                  {formError && (
+                    <div className="flex items-center gap-2 text-sm" style={{ color: "var(--rose)" }}>
+                      <AlertCircle size={14} /> {formError}
+                    </div>
+                  )}
+                  <div className="flex gap-2">
+                    <button className="btn-ghost flex-1" onClick={cancelBorrow}>Batal</button>
+                    <button
+                      className="btn-primary flex-1"
+                      onClick={submitBorrow}
+                      disabled={!sourceCategory || requiredBorrowAmount <= 0 || requiredBorrowAmount > sourceRemaining}
+                    >
+                      Gunakan alokasi ini
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -2088,6 +2435,13 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
   const [carryoverEnabled, setCarryoverEnabled] = useState(true);
   const [carryoverCategoryId, setCarryoverCategoryId] = useState(user.categories[0]?.id || "");
   const [carryoverSubId, setCarryoverSubId] = useState("");
+  const [repaymentAmounts, setRepaymentAmounts] = useState(() => {
+    const existingPeriod = getSalaryPeriods(user).find((period) => period.startDate === todayStr());
+    return Object.fromEntries((existingPeriod?.allocationRepayments || []).map((item) => [
+      allocationLoanKey(item.fromCategoryId, item.toCategoryId),
+      String(item.amount),
+    ]));
+  });
   const [editingSalaryAllocation, setEditingSalaryAllocation] = useState(false);
   const [salaryError, setSalaryError] = useState("");
   const [salaryBusy, setSalaryBusy] = useState(false);
@@ -2105,6 +2459,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
     ? getPeriodCashRemainder(user, transactions, previousSalaryPeriod, salaryDate)
     : 0;
   const carryoverCategory = salaryCategories.find((category) => category.id === carryoverCategoryId) || salaryCategories[0];
+  const outstandingLoans = getOutstandingAllocationLoans(user, transactions, salaryDate);
 
   const chooseCategory = (id) => { setCategoryId(id); setSubId(""); };
   const chooseTarget = (nextTarget) => {
@@ -2126,13 +2481,46 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
       const salary = Number(salaryAmount);
       if (!(salary > 0)) { setSalaryError("Nominal gaji harus lebih dari 0."); return; }
       if (!salaryDate || salaryDate > todayStr()) { setSalaryError("Tanggal gaji tidak boleh di masa depan."); return; }
+      const allocationRepayments = [];
+      const repaymentTotals = new Map();
+      for (const loan of outstandingLoans) {
+        const repaymentAmount = Number(repaymentAmounts[loan.key] || 0);
+        if (!Number.isFinite(repaymentAmount) || repaymentAmount < 0 || repaymentAmount > loan.amount) {
+          setSalaryError(`Nominal penyesuaian pinjaman ${allocationCategoryName(user, loan.fromCategoryId)} tidak valid.`);
+          return;
+        }
+        const borrowerCategory = salaryCategories.find((category) => category.id === loan.fromCategoryId);
+        const lenderCategory = salaryCategories.find((category) => category.id === loan.toCategoryId);
+        const borrowerAllocation = borrowerCategory ? salary * borrowerCategory.percent / 100 : 0;
+        if (repaymentAmount > 0 && (!borrowerCategory || !lenderCategory)) {
+          setSalaryError("Aktifkan kembali kedua kategori pinjaman sebelum menyesuaikan alokasinya.");
+          return;
+        }
+        if (repaymentAmount > borrowerAllocation) {
+          setSalaryError(`Penyesuaian pinjaman melebihi alokasi baru ${borrowerCategory?.name || "peminjam"}.`);
+          return;
+        }
+        if (repaymentAmount > 0) {
+          const borrowerRepaymentTotal = (repaymentTotals.get(loan.fromCategoryId) || 0) + repaymentAmount;
+          if (borrowerRepaymentTotal > borrowerAllocation) {
+            setSalaryError(`Total penyesuaian pinjaman melebihi alokasi baru ${borrowerCategory.name}.`);
+            return;
+          }
+          repaymentTotals.set(loan.fromCategoryId, borrowerRepaymentTotal);
+          allocationRepayments.push({
+            fromCategoryId: loan.fromCategoryId,
+            toCategoryId: loan.toCategoryId,
+            amount: repaymentAmount,
+          });
+        }
+      }
       setSalaryBusy(true);
       setSalaryError("");
       try {
         const carryover = carryoverEnabled && availableCarryover > 0 && carryoverCategory
           ? { categoryId: carryoverCategory.id, subId: carryoverSubId || null, amount: availableCarryover }
           : null;
-        const saved = await onSalarySubmit(salary, salaryDate, salaryCategories, carryover);
+        const saved = await onSalarySubmit(salary, salaryDate, salaryCategories, carryover, allocationRepayments);
         if (typeof saved === "string") setSalaryError(`Gagal menyimpan gaji: ${saved}`);
         else if (!saved) setSalaryError("Gaji belum berhasil disimpan. Coba lagi.");
       } catch (error) {
@@ -2193,7 +2581,21 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
                 <input type="number" value={salaryAmount} onChange={(event) => { setSalaryAmount(event.target.value); setSalaryError(""); }} placeholder="cth. 8000000" />
               </Field>
               <Field label="Tanggal gaji diterima">
-                <input type="date" value={salaryDate} max={todayStr()} onChange={(event) => { setSalaryDate(event.target.value); setSalaryError(""); }} />
+                <input
+                  type="date"
+                  value={salaryDate}
+                  max={todayStr()}
+                  onChange={(event) => {
+                    const nextDate = event.target.value;
+                    setSalaryDate(nextDate);
+                    setSalaryError("");
+                    const existingPeriod = getSalaryPeriods(user).find((period) => period.startDate === nextDate);
+                    setRepaymentAmounts(Object.fromEntries((existingPeriod?.allocationRepayments || []).map((item) => [
+                      allocationLoanKey(item.fromCategoryId, item.toCategoryId),
+                      String(item.amount),
+                    ])));
+                  }}
+                />
               </Field>
               <Field label="Alokasi periode baru">
                 <div className="flex gap-2 flex-wrap">
@@ -2202,6 +2604,44 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
                 </div>
               </Field>
               <p className="muted text-xs">Gaji ini memulai periode baru. Transaksi periode lama tetap tersimpan.</p>
+              {outstandingLoans.length > 0 && (
+                <div className="card2 p-3 flex flex-col gap-3">
+                  <div>
+                    <p className="text-sm font-medium">Sesuaikan pinjaman alokasi</p>
+                    <p className="muted text-xs">Nominal yang diisi akan mengurangi alokasi peminjam dan menambah alokasi sumber pada periode baru.</p>
+                  </div>
+                  {outstandingLoans.map((loan) => {
+                    const borrower = salaryCategories.find((category) => category.id === loan.fromCategoryId);
+                    const lender = salaryCategories.find((category) => category.id === loan.toCategoryId);
+                    const maxRepayment = borrower ? Math.min(loan.amount, salary * borrower.percent / 100) : 0;
+                    return (
+                      <div key={loan.key} className="flex items-center justify-between gap-3 flex-wrap">
+                        <span className="text-sm">
+                          {allocationCategoryName(user, loan.fromCategoryId)} → {allocationCategoryName(user, loan.toCategoryId)}
+                          <span className="muted text-xs"> · sisa {rupiah(loan.amount)}</span>
+                        </span>
+                        {borrower && lender ? (
+                          <input
+                            aria-label={`Penyesuaian pinjaman ${allocationCategoryName(user, loan.fromCategoryId)} ke ${allocationCategoryName(user, loan.toCategoryId)}`}
+                            type="number"
+                            min="0"
+                            max={maxRepayment}
+                            value={repaymentAmounts[loan.key] || ""}
+                            onChange={(event) => {
+                              setRepaymentAmounts((current) => ({ ...current, [loan.key]: event.target.value }));
+                              setSalaryError("");
+                            }}
+                            placeholder="0 = tunda"
+                            style={{ maxWidth: 150 }}
+                          />
+                        ) : (
+                          <span className="muted text-xs">Kategori pinjaman perlu diaktifkan kembali untuk penyesuaian.</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
               {availableCarryover > 0 && (
                 <div className="card2 p-3 flex flex-col gap-3">
                   <label className="flex items-center gap-2 text-sm" style={{ cursor: "pointer" }}>
@@ -2345,9 +2785,11 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
 
   const directTopupForCat = (catId) => topups.filter((t) => t.categoryId === catId && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const topupForSub = (catId, subId) => topups.filter((t) => t.categoryId === catId && t.subId === subId).reduce((s, t) => s + Number(t.amount), 0);
-  const spentForCat = (catId) => expenses.filter((t) => t.categoryId === catId && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
+  const spentForCat = (catId) => allocationBudgetSpent(expenses, catId);
   const assetDepositForCat = (catId) => monthT.filter((t) => t.categoryId === catId && isAssetMonthlyDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0);
-  const spentForSub = (catId, subId) => expenses.filter((t) => t.categoryId === catId && t.subId === subId && !t.directAsset).reduce((s, t) => s + Number(t.amount), 0);
+  const spentForSub = (catId, subId) => expenses.filter((t) =>
+    t.categoryId === catId && t.subId === subId && !t.directAsset
+  ).reduce((sum, transaction) => sum + Number(transaction.amount || 0) - transactionBorrowedAmount(transaction), 0);
 
   const monthTxSorted = [...monthT].sort((a, b) => (a.date < b.date ? 1 : -1));
   const filteredTx = search.trim()
@@ -2455,7 +2897,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
             {historyCategories.map((c, i) => {
               const directTopup = directTopupForCat(c.id);
               const subTopupTotal = topups.filter((t) => t.categoryId === c.id && t.subId).reduce((s, t) => s + Number(t.amount), 0);
-              const baseAllocated = effectiveIncome * c.percent / 100;
+              const baseAllocated = effectiveIncome * c.percent / 100 + periodAllocationAdjustment(selectedPeriod, c.id);
               const categoryCarryover = periodCarryoverAmount(selectedPeriod, c.id);
               const allocated = baseAllocated + directTopup + subTopupTotal + categoryCarryover;
               const spent = c.isAsset
@@ -2507,6 +2949,17 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
                       })}
                     </div>
                   )}
+                  {expanded && monthT.some((transaction) => transaction.borrowedFromCategoryId === c.id) && (
+                    <div className="mt-3 pl-4 flex flex-col gap-2" style={{ borderLeft: "2px solid var(--border)" }}>
+                      <p className="muted text-xs">Pengeluaran kategori lain yang dibiayai alokasi ini</p>
+                      {monthT.filter((transaction) => transaction.borrowedFromCategoryId === c.id).map((transaction) => (
+                        <div key={transaction.id} className="flex justify-between gap-3 text-xs">
+                          <span>{transaction.note || allocationCategoryName(user, transaction.categoryId)}</span>
+                          <span className="tabular">{rupiah(transactionBorrowedAmount(transaction))}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {expanded && c.subs.length === 0 && <p className="muted text-xs mt-2 pl-4">Kategori ini belum punya sub-alokasi.</p>}
                 </div>
               );
@@ -2539,6 +2992,9 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
                       {t.date}
                       {cat ? ` · ${cat.name}` : ""}
                       {sub ? ` · ${sub.name}` : ""}
+                      {t.borrowedFromCategoryId
+                        ? ` · Pinjam ${rupiah(transactionBorrowedAmount(t))} dari ${allocationCategoryName(user, t.borrowedFromCategoryId)}`
+                        : ""}
                       {!cat && topup ? " · Seluruh alokasi" : assetOpening ? " · Saldo awal aset" : assetTopup ? " · Penambahan aset" : ""}
                     </p>
                   </div>
@@ -2558,6 +3014,10 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
         <EditTransactionModal
           tx={editingTx}
           cat={historyCategories.find((c) => c.id === editingTx.categoryId) || user.categories.find((c) => c.id === editingTx.categoryId) || null}
+          categories={user.categories}
+          user={user}
+          transactions={transactions}
+          period={selectedPeriod}
           onClose={() => setEditingTx(null)}
           onSave={(updated) => { onUpdateTx(updated); setEditingTx(null); }}
         />
@@ -2884,7 +3344,12 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
         typeof tx.date !== "string" ||
         !/^\d{4}-\d{2}-\d{2}$/.test(tx.date) ||
         !Number.isFinite(Number(tx.amount)) ||
-        Number(tx.amount) < 0
+        Number(tx.amount) < 0 ||
+        (tx.borrowedAmount !== null && tx.borrowedAmount !== undefined &&
+          (!Number.isFinite(Number(tx.borrowedAmount)) ||
+            Number(tx.borrowedAmount) < 0 ||
+            Number(tx.borrowedAmount) > Number(tx.amount) ||
+            (Number(tx.borrowedAmount) > 0 && !tx.borrowedFromCategoryId)))
       )) throw new Error("format");
     } catch (error) {
       setImportError("File/teks JSON tidak valid atau formatnya bukan hasil export Pundi.");
@@ -3583,12 +4048,16 @@ function GoalsPage({ user, onBack, onUpdateGoals, onLogout, onAddTx, transaction
 }
 
 /* ---------- Edit transaction modal ---------- */
-function EditTransactionModal({ tx, cat, onClose, onSave }) {
+function EditTransactionModal({ tx, cat, categories = [], user, transactions = [], period, onClose, onSave }) {
   const [amount, setAmount] = useState(String(tx.amount));
   const [subId, setSubId] = useState(tx.subId || "");
+  const [borrowedFromCategoryId, setBorrowedFromCategoryId] = useState(tx.borrowedFromCategoryId || "");
   const [note, setNote] = useState(tx.note || "");
   const [date, setDate] = useState(tx.date);
   const [error, setError] = useState("");
+  const transactionCategory = categories.find((category) => category.id === tx.categoryId) || cat;
+  const canBorrow = isExpenseTx(tx) && !tx.directAsset && transactionCategory && !transactionCategory.isAsset;
+  const lenderCategories = categories.filter((category) => !category.isAsset && category.id !== tx.categoryId);
   const topup = isTopupTx(tx);
   const assetOpening = isAssetOpeningTx(tx);
   const withdraw = isWithdrawTx(tx);
@@ -3597,7 +4066,44 @@ function EditTransactionModal({ tx, cat, onClose, onSave }) {
   const submit = () => {
     const amt = Number(amount);
     if (!(amt > 0)) { setError("Jumlah harus lebih dari 0."); return; }
-    onSave({ ...tx, amount: amt, subId: subId || null, note: note.trim(), date });
+    if (canBorrow && borrowedFromCategoryId) {
+      const lender = categories.find((category) => category.id === borrowedFromCategoryId && !category.isAsset);
+      if (!lender || lender.id === tx.categoryId) {
+        setError("Pilih alokasi sumber pinjaman yang valid.");
+        return;
+      }
+      const editPeriod = user && getSalaryPeriods(user).filter((salaryPeriod) => salaryPeriod.startDate <= date).at(-1);
+      const transactionPeriod = editPeriod || period;
+      const requiredBorrowAmount = user && transactionPeriod
+        ? Math.max(0, amt - Math.max(0, allocationRemaining(user, transactions, transactionPeriod, tx.categoryId, tx.id)))
+        : 0;
+      const available = user && transactionPeriod
+        ? allocationRemaining(user, transactions, transactionPeriod, lender.id, tx.id)
+        : 0;
+      if (requiredBorrowAmount > available) {
+        setError(`Sisa alokasi "${lender.name}" tidak mencukupi. Sisa saat ini ${rupiah(available)}.`);
+        return;
+      }
+      onSave({
+        ...tx,
+        amount: amt,
+        subId: subId || null,
+        note: note.trim(),
+        date,
+        borrowedFromCategoryId: requiredBorrowAmount > 0 ? lender.id : null,
+        borrowedAmount: requiredBorrowAmount,
+      });
+      return;
+    }
+    onSave({
+      ...tx,
+      amount: amt,
+      subId: subId || null,
+      note: note.trim(),
+      date,
+      borrowedFromCategoryId: canBorrow ? (borrowedFromCategoryId || null) : null,
+      borrowedAmount: 0,
+    });
   };
 
   return (
@@ -3611,11 +4117,19 @@ function EditTransactionModal({ tx, cat, onClose, onSave }) {
           <Field label="Nominal">
             <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} />
           </Field>
-          {cat && cat.subs.length > 0 && (
+          {transactionCategory && transactionCategory.subs.length > 0 && (
             <Field label="Sub-alokasi">
               <select value={subId} onChange={(e) => setSubId(e.target.value)}>
                 <option value="">Tanpa sub-kategori</option>
-                {cat.subs.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                {transactionCategory.subs.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </Field>
+          )}
+          {canBorrow && lenderCategories.length > 0 && (
+            <Field label="Sumber alokasi pinjaman">
+              <select value={borrowedFromCategoryId} onChange={(event) => setBorrowedFromCategoryId(event.target.value)}>
+                <option value="">Tidak ada pinjaman</option>
+                {lenderCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
               </select>
             </Field>
           )}
@@ -4032,12 +4546,14 @@ export default function App() {
     };
     userRef.current = loadedUser;
     setUser(loadedUser);
-    setTransactions((tx || []).map(({ user_id, category_id, sub_id, direct_asset, goal_id, ...item }) => ({
+    setTransactions((tx || []).map(({ user_id, category_id, sub_id, direct_asset, goal_id, borrowed_from_category_id, borrowed_amount, ...item }) => ({
       ...item,
       categoryId: category_id,
       subId: sub_id,
       directAsset: !!direct_asset,
       goalId: goal_id || null,
+      borrowedFromCategoryId: borrowed_from_category_id || null,
+      borrowedAmount: borrowed_amount == null ? null : Number(borrowed_amount),
       amount: Number(item.amount),
     })));
     setAccountLoaded(true);
@@ -4108,6 +4624,8 @@ export default function App() {
       sub_id: item.subId || null,
       direct_asset: !!item.directAsset,
       goal_id: item.goalId || null,
+      borrowed_from_category_id: item.borrowedFromCategoryId || null,
+      borrowed_amount: item.borrowedFromCategoryId ? transactionBorrowedAmount(item) : 0,
       note: item.note || null,
       amount: Number(item.amount),
   });
@@ -4267,6 +4785,8 @@ export default function App() {
       subId: transaction.subId || null,
       directAsset: !!transaction.directAsset,
       goalId: transaction.goalId || null,
+      borrowedFromCategoryId: transaction.borrowedFromCategoryId || null,
+      borrowedAmount: transaction.borrowedAmount == null ? null : Number(transaction.borrowedAmount),
     }));
     try {
       await replaceTransactions(user.id, normalizedTransactions);
@@ -4342,7 +4862,7 @@ export default function App() {
     return true;
   };
 
-  const handleConfirmMonthIncome = async (amount, startDate, categories, carryover = null) => {
+  const handleConfirmMonthIncome = async (amount, startDate, categories, carryover = null, allocationRepayments = []) => {
     const periods = getSalaryPeriods(user);
     const existing = periods.find((period) => period.startDate === startDate);
     const nextPeriod = {
@@ -4354,6 +4874,7 @@ export default function App() {
         subs: (category.subs || []).map((sub) => ({ ...sub })),
       })),
       carryovers: carryover ? [{ ...carryover }] : [],
+      allocationRepayments: allocationRepayments.map((repayment) => ({ ...repayment })),
     };
     const salaryPeriods = [...periods.filter((period) => period.startDate !== startDate), nextPeriod]
       .sort((a, b) => a.startDate.localeCompare(b.startDate));
