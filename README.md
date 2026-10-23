@@ -48,7 +48,8 @@ transaksi.
 2. Buka **SQL Editor**, lalu jalankan isi [`supabase/schema.sql`](./supabase/schema.sql)
    dan [`supabase/feedback.sql`](./supabase/feedback.sql).
    Jika project Supabase sudah disiapkan sebelumnya, jalankan ulang `schema.sql`
-   untuk memperbarui pemeriksaan ketersediaan email dan skema RPC.
+   untuk memperbarui pemeriksaan email serta menambahkan penyimpanan transaksi
+   atomik dan kolom keterkaitan transaksi dengan tujuan.
 3. Salin `.env.example` menjadi `.env.local`.
 4. Isi `VITE_SUPABASE_URL` dan `VITE_SUPABASE_ANON_KEY` dari **Project Settings →
    API**. Gunakan key `anon`/publishable, bukan `service_role`. Isi
@@ -68,9 +69,10 @@ callback tersebut:
 2. Set **Site URL** ke URL utama website, misalnya
    `https://pundi.example.com`.
 3. Tambahkan URL berikut ke **Redirect URLs**:
-   `https://pundi.example.com/?auth=signup`. Untuk development, tambahkan
-   `http://localhost:5173/?auth=signup` dan/atau
-   `http://127.0.0.1:5173/?auth=signup` sesuai alamat yang dibuka.
+   `https://pundi.example.com/?auth=signup` dan
+   `https://pundi.example.com/?auth=recovery`. Untuk development, tambahkan
+   `http://localhost:5173/?auth=signup`, `http://localhost:5173/?auth=recovery`,
+   serta URL `127.0.0.1` yang sesuai jika digunakan.
 4. Di **Authentication → Email Templates → Confirm signup**, pastikan tombol
    konfirmasi memakai `{{ .ConfirmationURL }}` sebagai URL-nya. Supabase akan
    memverifikasi email lalu mengarahkan kembali ke callback aplikasi.

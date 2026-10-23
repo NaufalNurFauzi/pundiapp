@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { authCallbackUrl, supabase } from "./lib/supabase";
+import { authCallbackUrl, authRecoveryUrl, supabase } from "./lib/supabase";
 import {
   LogIn, UserPlus, ArrowRight, ArrowLeft, Check, Pencil, Plus, Trash2,
   LogOut, Wallet, ChevronRight, AlertCircle, X, Settings, Search,
@@ -56,9 +56,12 @@ function friendlyErrorMessage(error, fallback) {
   }
   return fallback;
 }
-const todayStr = () => new Date().toISOString().slice(0, 10);
+const todayStr = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+};
 const monthKey = (d) => (d || "").slice(0, 7);
-const nowMonthKey = () => new Date().toISOString().slice(0, 7);
+const nowMonthKey = () => todayStr().slice(0, 7);
 const monthLabel = () =>
   new Date().toLocaleDateString("id-ID", { month: "long", year: "numeric" });
 const isExpenseTx = (t) => t.type !== "topup" && t.type !== "withdraw" && t.type !== "asset_topup" && t.type !== "asset_opening" && !t.directAsset;
@@ -238,20 +241,6 @@ const emailKey = (e) => `mmp_email_${e.trim().toLowerCase()}`;
 const SESSION_KEY = "mmp_session";
 const THEME_KEY = "mmp_theme";
 
-/* Password is hashed (SHA-256) before it's ever written to storage.
-   Legacy accounts created before this feature still have a plaintext
-   `password` field; verifyPassword accepts that once and upgrades it. */
-async function hashPassword(pw) {
-  const enc = new TextEncoder().encode(pw);
-  const buf = await crypto.subtle.digest("SHA-256", enc);
-  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-async function verifyPassword(pw, user) {
-  if (user.passwordHash) return (await hashPassword(pw)) === user.passwordHash;
-  if (user.password) return user.password === pw; // legacy fallback, upgraded on next login
-  return false;
-}
-
 function triggerDownload(filename, content, mime) {
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -334,7 +323,7 @@ function ProgressBar({ percent, color }) {
 function SpendingTrendChart({ user, transactions }) {
   const [hoveredPeriod, setHoveredPeriod] = useState(null);
   const periods = getSalaryPeriods(user);
-  const trendPeriods = (periods.length ? periods : [getActivePeriod(user)]).slice(-3);
+  const trendPeriods = (periods.length ? periods : [getActivePeriod(user)]).slice(-6);
   const values = trendPeriods.map((period) => ({
     id: period.id,
     label: `Periode mulai ${dateLabel(period.startDate)}`,
@@ -1302,7 +1291,7 @@ function ResumeScreen({ categories, income, onEdit, onConfirm }) {
 }
 
 /* ---------- Allocation editor (post-setup, opened from dashboard) ---------- */
-function AllocationEditor({ user, onSave, onCancel, initialCategories, incomeOverride, embedded = false }) {
+function AllocationEditor({ user, onSave, onCancel, onLogout, initialCategories, incomeOverride, embedded = false }) {
   const sourceCategories = initialCategories || user.categories;
   const [categories, setCategories] = useState(sourceCategories.map((c) => ({ ...c, subs: (c.subs || []).map((s) => ({ ...s })) })));
   const [expandedId, setExpandedId] = useState(null);
@@ -1358,7 +1347,7 @@ function AllocationEditor({ user, onSave, onCancel, initialCategories, incomeOve
   return (
     <div className={embedded ? "modal-overlay anim-fade" : "min-h-screen"} onClick={embedded ? onCancel : undefined}>
       <div className={embedded ? "card p-4 anim-pop" : ""} style={embedded ? { maxWidth: 760, maxHeight: "92vh", width: "100%", overflowY: "auto" } : undefined} onClick={embedded ? (event) => event.stopPropagation() : undefined}>
-      {!embedded && <TopBar name={user.name} onLogout={onCancel} right={
+      {!embedded && <TopBar name={user.name} onLogout={onLogout} right={
         <button className="btn-ghost text-sm flex items-center gap-2" onClick={onCancel}><ArrowLeft size={14} /> Batal</button>
       } />}
       <div className={`p-4 md:p-8 max-w-3xl mx-auto flex flex-col gap-6 anim-fade-up${embedded ? "" : ""}`}>
@@ -1517,7 +1506,7 @@ function AppFooter() {
       >
         @naufalnurf__
       </a>
-      <span className="muted"> · v1.3.2</span>
+      <span className="muted"> · v1.3.3</span>
     </footer>
   );
 }
@@ -2324,7 +2313,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
 }
 
 /* ---------- Monthly history ---------- */
-function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) {
+function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, onLogout }) {
   const periods = getSalaryPeriods(user);
   const activePeriod = getActivePeriod(user);
   const historyPeriods = periods.length ? periods : [activePeriod];
@@ -2382,7 +2371,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
     <div className="min-h-screen">
       <TopBar
         name={user.name}
-        onLogout={onBack}
+        onLogout={onLogout}
         right={<button className="btn-ghost text-sm flex items-center gap-2" onClick={onBack}><ArrowLeft size={14} /> Dashboard</button>}
       />
       <div className="p-4 md:p-8 max-w-3xl mx-auto flex flex-col gap-6 anim-fade-up">
@@ -2578,12 +2567,9 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx }) 
 }
 
 /* ---------- Forgot password modal ---------- */
-function ForgotPasswordModal({ onClose }) {
-  const [step, setStep] = useState("email"); // email | question | reset | done
+function ForgotPasswordModal({ onClose, recoveryMode = false, onRecoveryComplete }) {
+  const [step, setStep] = useState(recoveryMode ? "reset" : "email");
   const [email, setEmail] = useState("");
-  const [username, setUsername] = useState("");
-  const [account, setAccount] = useState(null);
-  const [answer, setAnswer] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
@@ -2592,8 +2578,8 @@ function ForgotPasswordModal({ onClose }) {
   const checkEmail = async () => {
     if (!email.trim()) return;
     setBusy(true); setError("");
-    const { error: resetError } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-      redirectTo: window.location.origin,
+    const { error: resetError } = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+      redirectTo: authRecoveryUrl,
     });
     setBusy(false);
     if (resetError) {
@@ -2604,18 +2590,8 @@ function ForgotPasswordModal({ onClose }) {
     setStep("done");
   };
 
-  const verifyAnswer = () => {
-    if (!answer.trim()) return;
-    if (answer.trim().toLowerCase() !== (account.securityAnswer || "").trim().toLowerCase()) {
-      setError("Jawaban belum tepat, coba lagi.");
-      return;
-    }
-    setError("");
-    setStep("reset");
-  };
-
   const resetPassword = async () => {
-    if (newPassword.length < 4) { setError("Password minimal 4 karakter."); return; }
+    if (newPassword.length < 6) { setError("Password minimal 6 karakter."); return; }
     if (newPassword !== confirmPassword) { setError("Konfirmasi password tidak sama."); return; }
     setBusy(true); setError("");
     const { error: resetError } = await supabase.auth.updateUser({ password: newPassword });
@@ -2626,6 +2602,15 @@ function ForgotPasswordModal({ onClose }) {
       return;
     }
     setBusy(false);
+    if (recoveryMode) {
+      try {
+        await onRecoveryComplete();
+      } catch (error) {
+        console.error("Password recovery completion failed", error);
+        setError("Password berhasil diperbarui, tetapi sesi belum dapat ditutup. Silakan masuk kembali.");
+        return;
+      }
+    }
     setStep("done");
   };
 
@@ -2639,7 +2624,7 @@ function ForgotPasswordModal({ onClose }) {
 
         {step === "email" && (
           <>
-            <p className="muted text-sm mb-4">Masukkan email akunmu, kita cek dulu apakah akunnya ada.</p>
+            <p className="muted text-sm mb-4">Masukkan email akunmu. Jika akun tersedia, kami akan mengirim tautan untuk membuat password baru.</p>
             <div className="flex flex-col gap-4">
               <Field label="Email">
                 <input
@@ -2658,32 +2643,9 @@ function ForgotPasswordModal({ onClose }) {
           </>
         )}
 
-        {step === "question" && account && (
-          <>
-            <p className="muted text-sm mb-4">Jawab pertanyaan keamanan akun <b style={{ color: "var(--text)" }}>{username}</b> ini.</p>
-            <div className="flex flex-col gap-4">
-              <Field label={account.securityQuestion}>
-                <input
-                  value={answer}
-                  onChange={(e) => setAnswer(e.target.value)}
-                  onKeyDown={onEnter(verifyAnswer)}
-                  placeholder="Jawabanmu"
-                />
-              </Field>
-              {error && <div className="flex items-center gap-2 text-sm" style={{ color: "var(--rose)" }}><AlertCircle size={14} /> {error}</div>}
-              <div className="flex gap-2">
-                <button className="btn-ghost flex items-center gap-2" onClick={() => setStep("email")}><ArrowLeft size={15} /> Kembali</button>
-                <button className="btn-primary flex-1 flex items-center justify-center gap-2" onClick={verifyAnswer} disabled={!answer.trim()}>
-                  Verifikasi <Check size={16} />
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-
         {step === "reset" && (
           <>
-            <p className="muted text-sm mb-4">Jawaban benar. Buat password baru untuk akunmu.</p>
+            <p className="muted text-sm mb-4">Buat password baru untuk akunmu.</p>
             <div className="flex flex-col gap-4">
               <Field label="Password Baru">
                 <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="••••••••" />
@@ -2708,8 +2670,10 @@ function ForgotPasswordModal({ onClose }) {
         {step === "done" && (
           <>
             <div className="check-badge anim-pop-delay" style={{ marginTop: 8 }}><Check size={26} color="#101815" /></div>
-            <p className="text-center mt-4" style={{ fontWeight: 600 }}>Email reset password terkirim!</p>
-            <p className="muted text-sm text-center mt-1">Buka tautan di email untuk membuat password baru.</p>
+            <p className="text-center mt-4" style={{ fontWeight: 600 }}>
+              {recoveryMode ? "Password berhasil diperbarui." : "Jika email terdaftar, tautan reset password akan dikirim."}
+            </p>
+            {!recoveryMode && <p className="muted text-sm text-center mt-1">Buka tautan di email untuk membuat password baru.</p>}
             <button className="btn-primary w-full mt-6 flex items-center justify-center gap-2" onClick={onClose}>
               Kembali ke Masuk <ArrowRight size={16} />
             </button>
@@ -2734,8 +2698,9 @@ function ResetAccountModal({ user, onClose, onConfirm }) {
     setBusy(true); setError("");
     const { error: authError } = await supabase.auth.signInWithPassword({ email: user.email, password });
     if (authError) { setBusy(false); setError("Password salah."); return; }
-    await onConfirm();
+    const reset = await onConfirm();
     setBusy(false);
+    if (!reset) setError("Data akun belum berhasil direset. Periksa pesan error lalu coba lagi.");
   };
 
   return (
@@ -2790,10 +2755,20 @@ function DeleteAccountModal({ user, onClose, onConfirm }) {
   const submit = async () => {
     if (!canSubmit) return;
     setBusy(true); setError("");
-    const ok = await verifyPassword(password, user);
-    if (!ok) { setBusy(false); setError("Password salah."); return; }
-    await onConfirm();
-    setBusy(false);
+    try {
+      const { error: authError } = await supabase.auth.signInWithPassword({ email: user.email, password });
+      if (authError) {
+        setError(authError.message.includes("Invalid login credentials") ? "Password salah." : friendlyErrorMessage(authError, "Konfirmasi password gagal."));
+        return;
+      }
+      const deleted = await onConfirm();
+      if (!deleted) setError("Akun belum berhasil dihapus. Periksa koneksi dan pengaturan Supabase, lalu coba lagi.");
+    } catch (error) {
+      console.error("Account deletion confirmation failed", error);
+      setError(friendlyErrorMessage(error, "Akun belum berhasil dihapus. Coba lagi."));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -2843,6 +2818,7 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
   const [income, setIncome] = useState(user.income || "");
   const [payDay, setPayDay] = useState(String(user.payDay || 1));
   const [profileSaved, setProfileSaved] = useState(false);
+  const [profileError, setProfileError] = useState("");
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
   const [importOk, setImportOk] = useState(false);
@@ -2857,13 +2833,21 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
   const feedbackFileInputRef = useRef(null);
 
   const profileValid = name.trim() && Number(age) > 0 && Number(income) > 0 && Number(payDay) >= 1 && Number(payDay) <= 31;
-  const saveProfile = () => {
+  const saveProfile = async () => {
     if (!profileValid) return;
-    onUpdateProfile({
-      name: name.trim(), age: Number(age), income: Number(income), payDay: Number(payDay),
-    });
-    setProfileSaved(true);
-    setTimeout(() => setProfileSaved(false), 2000);
+    setProfileError("");
+    setProfileSaved(false);
+    try {
+      const saved = await onUpdateProfile({
+        name: name.trim(), age: Number(age), income: Number(income), payDay: Number(payDay),
+      });
+      if (!saved) throw new Error("Perubahan profil belum tersimpan.");
+      setProfileSaved(true);
+      setTimeout(() => setProfileSaved(false), 2000);
+    } catch (error) {
+      console.error("Profile settings save failed", error);
+      setProfileError(friendlyErrorMessage(error, "Perubahan profil belum tersimpan. Periksa koneksi lalu coba lagi."));
+    }
   };
 
   const exportJson = () => {
@@ -2886,43 +2870,57 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
     triggerDownload(`pundi-transaksi-${user.username}-${todayStr()}.csv`, transactionsToCsv(user, transactions), "text/csv");
   };
 
-  const doImport = () => {
+  const doImport = async () => {
     setImportError(""); setImportOk(false);
+    let parsed;
     try {
-      const parsed = JSON.parse(importText);
+      parsed = JSON.parse(importText);
       if (!parsed.user || !Array.isArray(parsed.transactions)) throw new Error("format");
       const u = parsed.user;
       if (!Array.isArray(u.categories)) throw new Error("format");
-      onImport(
-        {
-          name: u.name || "", age: u.age || null, income: u.income || null,
-          monthlyIncomes: (u.monthlyIncomes && typeof u.monthlyIncomes === "object")
-            ? u.monthlyIncomes
-            : (u.income ? { [nowMonthKey()]: u.income } : {}),
-          salaryPeriods: Array.isArray(u.salaryPeriods) ? u.salaryPeriods : [],
-          payDay: Math.max(1, Math.min(31, Number(u.payDay) || 1)),
-          assetArchive: Array.isArray(u.assetArchive) ? u.assetArchive : [],
-          strategyMode: u.strategyMode || "custom", categories: u.categories,
-          recurring: Array.isArray(u.recurring) ? u.recurring : [],
-          goals: Array.isArray(u.goals) ? u.goals : [],
-          confirmed: true, stage: "dashboard",
-        },
-        parsed.transactions
-      );
+      if (parsed.transactions.some((tx) =>
+        !tx ||
+        typeof tx.id !== "string" ||
+        typeof tx.date !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(tx.date) ||
+        !Number.isFinite(Number(tx.amount)) ||
+        Number(tx.amount) < 0
+      )) throw new Error("format");
+    } catch (error) {
+      setImportError("File/teks JSON tidak valid atau formatnya bukan hasil export Pundi.");
+      return;
+    }
+
+    const u = parsed.user;
+    try {
+      await onImport({
+        name: u.name || "", age: u.age || null, income: u.income || null,
+        monthlyIncomes: (u.monthlyIncomes && typeof u.monthlyIncomes === "object")
+          ? u.monthlyIncomes
+          : (u.income ? { [nowMonthKey()]: u.income } : {}),
+        salaryPeriods: Array.isArray(u.salaryPeriods) ? u.salaryPeriods : [],
+        payDay: Math.max(1, Math.min(31, Number(u.payDay) || 1)),
+        assetArchive: Array.isArray(u.assetArchive) ? u.assetArchive : [],
+        strategyMode: u.strategyMode || "custom", categories: u.categories,
+        recurring: Array.isArray(u.recurring) ? u.recurring : [],
+        goals: Array.isArray(u.goals) ? u.goals : [],
+        confirmed: true, stage: "dashboard",
+      }, parsed.transactions);
       setImportOk(true);
       setImportText("");
-    } catch (e) {
-      setImportError("File/teks JSON tidak valid atau formatnya bukan hasil export Pundi.");
+    } catch (error) {
+      console.error("Backup import failed", error);
+      setImportError(friendlyErrorMessage(error, error?.message || "Impor gagal disimpan. Data sebelumnya tetap dipertahankan."));
     }
   };
-  const migrateLocal = () => {
+  const migrateLocal = async () => {
     setMigrationError(""); setMigrationOk(false);
     try {
       const prefix = "pundi:shared:";
       const localUser = JSON.parse(window.localStorage.getItem(`${prefix}mmp_user_${user.username}`) || "null");
       const localTx = JSON.parse(window.localStorage.getItem(`${prefix}mmp_tx_${user.username}`) || "[]");
       if (!localUser || !Array.isArray(localTx)) throw new Error("missing");
-      onMigrateLocal({
+      const migrated = await onMigrateLocal({
         name: localUser.name || "", age: localUser.age || null, income: localUser.income || null,
         monthlyIncomes: localUser.monthlyIncomes || {},
         salaryPeriods: Array.isArray(localUser.salaryPeriods) ? localUser.salaryPeriods : [],
@@ -2932,9 +2930,10 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
         recurring: localUser.recurring || [], goals: localUser.goals || [],
         confirmed: !!localUser.confirmed, stage: localUser.stage || "dashboard",
       }, localTx);
+      if (!migrated) throw new Error("Migrasi belum tersimpan.");
       setMigrationOk(true);
     } catch (error) {
-      setMigrationError("Data lokal untuk username ini tidak ditemukan di browser ini.");
+      setMigrationError(error?.message || "Data lokal untuk username ini tidak ditemukan di browser ini.");
     }
   };
 
@@ -3024,6 +3023,7 @@ function SettingsPage({ user, transactions, theme, onToggleTheme, onUpdateProfil
             </Field>
             <p className="muted text-xs">Pengingat muncul mulai tanggal ini. Periode anggaran hanya dimulai saat kamu mencatat gaji lewat tombol Input Gaji; tanggal dan nominalnya bisa berbeda setiap periode.</p>
             <p className="muted text-xs">Mengubah income acuan tidak mengubah periode aktif. Input gaji aktual dan alokasinya dilakukan lewat Tambah Uang.</p>
+            {profileError && <div role="alert" className="text-sm" style={{ color: "var(--rose)" }}>{profileError}</div>}
             <button className="btn-primary flex items-center justify-center gap-2" onClick={saveProfile} disabled={!profileValid}>
               <Check size={16} /> {profileSaved ? "Tersimpan!" : "Simpan Profil"}
             </button>
@@ -3481,7 +3481,14 @@ function GoalsPage({ user, onBack, onUpdateGoals, onLogout, onAddTx, transaction
   const getGoalSaved = (goalId) => {
     const goal = goals.find((g) => g.id === goalId);
     if (!goal) return 0;
-    return (transactions || []).filter((t) => t.goalId === goalId && t.type === "expense").reduce((s, t) => s + Number(t.amount), 0);
+    const goalTransactions = (transactions || []).filter((transaction) => transaction.goalId === goalId);
+    const contributed = goalTransactions
+      .filter((transaction) => transaction.type === "expense")
+      .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+    const withdrawn = goalTransactions
+      .filter((transaction) => transaction.type === "withdraw")
+      .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+    return Math.max(0, contributed - withdrawn);
   };
 
   const contribute = (id, sign) => {
@@ -3891,6 +3898,7 @@ export default function App() {
   const [pendingUser, setPendingUser] = useState(null); // holds new account while welcome modal shows
   const [showAddMoney, setShowAddMoney] = useState(false);
   const [showForgotPassword, setShowForgotPassword] = useState(false);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
   const [showResetAccount, setShowResetAccount] = useState(false);
   const [showDeleteAccount, setShowDeleteAccount] = useState(false);
   const [theme, setTheme] = useState("dark");
@@ -3903,9 +3911,12 @@ export default function App() {
   const userRef = useRef(null);
   const signupConfirmationRef = useRef(false);
   const signupConfirmationHandledRef = useRef(false);
+  const passwordRecoveryRef = useRef(false);
 
   useEffect(() => {
-    signupConfirmationRef.current = new URLSearchParams(window.location.search).get("auth") === "signup";
+    const authFlow = new URLSearchParams(window.location.search).get("auth");
+    signupConfirmationRef.current = authFlow === "signup";
+    passwordRecoveryRef.current = authFlow === "recovery";
     const completeSignupConfirmation = async (session) => {
       if (signupConfirmationHandledRef.current) return;
       signupConfirmationHandledRef.current = true;
@@ -3929,6 +3940,12 @@ export default function App() {
         await completeSignupConfirmation(session);
         return;
       }
+      if (passwordRecoveryRef.current) {
+        setPasswordRecovery(true);
+        setShowForgotPassword(true);
+        setSessionChecked(true);
+        return;
+      }
       if (session) await loadAccount(session.user.id);
       setSessionChecked(true);
     })().catch((error) => {
@@ -3938,6 +3955,14 @@ export default function App() {
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === "PASSWORD_RECOVERY") {
+        passwordRecoveryRef.current = true;
+        setPasswordRecovery(true);
+        setShowForgotPassword(true);
+        setSessionChecked(true);
+        return;
+      }
+      if (passwordRecoveryRef.current) return;
       if (signupConfirmationRef.current && event === "SIGNED_IN" && session) {
         try {
           await completeSignupConfirmation(session);
@@ -4007,11 +4032,12 @@ export default function App() {
     };
     userRef.current = loadedUser;
     setUser(loadedUser);
-    setTransactions((tx || []).map(({ user_id, category_id, sub_id, direct_asset, ...item }) => ({
+    setTransactions((tx || []).map(({ user_id, category_id, sub_id, direct_asset, goal_id, ...item }) => ({
       ...item,
       categoryId: category_id,
       subId: sub_id,
       directAsset: !!direct_asset,
+      goalId: goal_id || null,
       amount: Number(item.amount),
     })));
     setAccountLoaded(true);
@@ -4081,6 +4107,7 @@ export default function App() {
       category_id: item.categoryId || null,
       sub_id: item.subId || null,
       direct_asset: !!item.directAsset,
+      goal_id: item.goalId || null,
       note: item.note || null,
       amount: Number(item.amount),
   });
@@ -4104,13 +4131,11 @@ export default function App() {
     });
   };
 
-  const replaceTransactions = (userId, tx) => enqueueTransactionSave(userId, async () => {
-    const { error: deleteError } = await supabase.from("transactions").delete().eq("user_id", userId);
-    if (deleteError) return { error: deleteError };
-    const rows = tx.map((item) => transactionRow(userId, item));
-    if (!rows.length) return { error: null };
-    return supabase.from("transactions").insert(rows);
-  });
+  const replaceTransactions = (userId, tx) => enqueueTransactionSave(userId, () =>
+    supabase.rpc("replace_my_transactions", {
+      replacement_rows: tx.map((item) => transactionRow(userId, item)),
+    })
+  );
 
   const updateUser = (patch) => {
     const save = profileMutationQueueRef.current.then(async () => {
@@ -4200,8 +4225,13 @@ export default function App() {
     setPendingUser(newUser); // show welcome notice before entering the app
   };
 
-  const handleLogout = () => {
-    void supabase.auth.signOut();
+  const handleLogout = async () => {
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      console.error("Sign-out failed", error);
+      setAuthError(friendlyErrorMessage(error, "Belum berhasil keluar. Periksa koneksi lalu coba lagi."));
+      return;
+    }
     userRef.current = null;
     setUser(null);
     setTransactions([]);
@@ -4210,26 +4240,74 @@ export default function App() {
     setPage("dashboard");
   };
 
-  const handleAddTx = (tx) => {
-    setTransactions((prev) => {
-      const next = [...prev, tx];
-      void enqueueTransactionSave(user.id, () => supabase.from("transactions").upsert(transactionRow(user.id, tx)));
-      return next;
-    });
+  const handlePasswordRecoveryComplete = async () => {
+    const { error } = await supabase.auth.signOut({ scope: "local" });
+    if (error) throw error;
+    passwordRecoveryRef.current = false;
+    setPasswordRecovery(false);
+    setShowForgotPassword(false);
+    userRef.current = null;
+    setUser(null);
+    setTransactions([]);
+    setAccountLoaded(false);
+    setAuthError("");
+    setAuthNotice("Password berhasil diperbarui. Silakan masuk dengan password baru.");
+    window.history.replaceState(null, "", window.location.pathname);
   };
-  const handleUpdateTx = (updatedTx) => {
-    setTransactions((prev) => {
-      const next = prev.map((t) => t.id === updatedTx.id ? updatedTx : t);
-      void enqueueTransactionSave(user.id, () => supabase.from("transactions").upsert(transactionRow(user.id, updatedTx)));
-      return next;
-    });
+
+  const handleImportData = async (userPatch, importedTransactions) => {
+    const profileSaved = await updateUser(userPatch);
+    if (!profileSaved) throw new Error("Profil backup belum tersimpan. Transaksi lama tidak diubah.");
+    const normalizedTransactions = importedTransactions.map((transaction) => ({
+      ...transaction,
+      id: String(transaction.id),
+      type: transaction.type || "expense",
+      amount: Number(transaction.amount),
+      categoryId: transaction.categoryId || null,
+      subId: transaction.subId || null,
+      directAsset: !!transaction.directAsset,
+      goalId: transaction.goalId || null,
+    }));
+    try {
+      await replaceTransactions(user.id, normalizedTransactions);
+    } catch (error) {
+      throw new Error("Profil berhasil diperbarui, tetapi transaksi gagal diganti. Transaksi lama tetap dipertahankan.");
+    }
+    setTransactions(normalizedTransactions.sort((a, b) => a.date.localeCompare(b.date)));
+    return true;
   };
-  const handleDeleteTx = (id) => {
-    setTransactions((prev) => {
-      const next = prev.filter((t) => t.id !== id);
-      void enqueueTransactionSave(user.id, () => supabase.from("transactions").delete().eq("id", id).eq("user_id", user.id));
-      return next;
-    });
+
+  const handleAddTx = async (tx) => {
+    try {
+      await enqueueTransactionSave(user.id, () =>
+        supabase.from("transactions").upsert(transactionRow(user.id, tx))
+      );
+      setTransactions((current) => [...current, tx].sort((a, b) => a.date.localeCompare(b.date)));
+    } catch {
+      // enqueueTransactionSave reports the failure and reloads the persisted account.
+    }
+  };
+  const handleUpdateTx = async (updatedTx) => {
+    try {
+      await enqueueTransactionSave(user.id, () =>
+        supabase.from("transactions").upsert(transactionRow(user.id, updatedTx))
+      );
+      setTransactions((current) => current
+        .map((transaction) => transaction.id === updatedTx.id ? updatedTx : transaction)
+        .sort((a, b) => a.date.localeCompare(b.date)));
+    } catch {
+      // enqueueTransactionSave reports the failure and reloads the persisted account.
+    }
+  };
+  const handleDeleteTx = async (id) => {
+    try {
+      await enqueueTransactionSave(user.id, () =>
+        supabase.from("transactions").delete().eq("id", id).eq("user_id", user.id)
+      );
+      setTransactions((current) => current.filter((transaction) => transaction.id !== id));
+    } catch {
+      // enqueueTransactionSave reports the failure and reloads the persisted account.
+    }
   };
   const handleAddRecurring = (item) => updateUser({ recurring: [...(user.recurring || []), item] });
   const handleRemoveRecurring = (id) => updateUser({ recurring: (user.recurring || []).filter((r) => r.id !== id) });
@@ -4253,13 +4331,15 @@ export default function App() {
       await persistUser(resetUser);
       await replaceTransactions(user.id, []);
     } catch (error) {
-      return;
+      console.error("Account data reset failed", error);
+      return false;
     }
     userRef.current = resetUser;
     setUser(resetUser);
     setTransactions([]);
     setPage("dashboard");
     setShowResetAccount(false);
+    return true;
   };
 
   const handleConfirmMonthIncome = async (amount, startDate, categories, carryover = null) => {
@@ -4421,14 +4501,17 @@ export default function App() {
     if (error) {
       console.error("Account deletion failed", error);
       setAuthError(friendlyErrorMessage(error, "Akun belum dapat dihapus. Coba lagi atau hubungi admin."));
-      return;
+      return false;
     }
-    await supabase.auth.signOut();
+    const { error: signOutError } = await supabase.auth.signOut({ scope: "local" });
+    if (signOutError) console.error("Local sign-out after account deletion failed", signOutError);
     setShowDeleteAccount(false);
     userRef.current = null;
     setUser(null);
     setTransactions([]);
+    setAccountLoaded(false);
     setPage("dashboard");
+    return true;
   };
 
   if (!sessionChecked) {
@@ -4460,7 +4543,15 @@ export default function App() {
             onContinue={() => { userRef.current = pendingUser; setUser(pendingUser); setPendingUser(null); }}
           />
         )}
-        {showForgotPassword && <ForgotPasswordModal onClose={() => setShowForgotPassword(false)} />}
+        {showForgotPassword && (
+          <ForgotPasswordModal
+            recoveryMode={passwordRecovery}
+            onRecoveryComplete={handlePasswordRecoveryComplete}
+            onClose={() => {
+              if (!passwordRecovery) setShowForgotPassword(false);
+            }}
+          />
+        )}
         <AppFooter />
       </div>
     );
@@ -4521,6 +4612,7 @@ export default function App() {
         <AllocationEditor
           user={user}
           onCancel={() => setPage("dashboard")}
+          onLogout={handleLogout}
           onSave={(categories) => {
             const activePeriod = getActivePeriod(user);
             const retainedAssetIds = new Set(categories.filter((category) => category.isAsset).map((category) => category.id));
@@ -4544,6 +4636,7 @@ export default function App() {
           onBack={() => setPage("dashboard")}
           onUpdateTx={handleUpdateTx}
           onDeleteTx={handleDeleteTx}
+          onLogout={handleLogout}
         />
       );
     } else if (page === "settings") {
@@ -4554,16 +4647,8 @@ export default function App() {
           theme={theme}
           onToggleTheme={toggleTheme}
           onUpdateProfile={(patch) => updateUser(patch)}
-          onImport={(userPatch, tx) => {
-            updateUser(userPatch);
-            setTransactions(tx);
-            void replaceTransactions(user.id, tx);
-          }}
-          onMigrateLocal={(userPatch, tx) => {
-            updateUser(userPatch);
-            setTransactions(tx);
-            void replaceTransactions(user.id, tx);
-          }}
+          onImport={handleImportData}
+          onMigrateLocal={handleImportData}
           onBack={() => setPage("dashboard")}
           onOpenReset={() => setShowResetAccount(true)}
           onOpenDelete={() => setShowDeleteAccount(true)}

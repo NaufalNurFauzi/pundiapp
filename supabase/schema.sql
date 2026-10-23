@@ -30,10 +30,12 @@ create table if not exists public.transactions (
   note text,
   amount numeric not null check (amount >= 0),
   direct_asset boolean not null default false,
+  goal_id text,
   created_at timestamptz not null default now()
 );
 
 alter table public.transactions add column if not exists direct_asset boolean not null default false;
+alter table public.transactions add column if not exists goal_id text;
 alter table public.profiles add column if not exists monthly_income_prompt_dismissed jsonb not null default '{}'::jsonb;
 alter table public.profiles add column if not exists salary_periods jsonb not null default '[]'::jsonb;
 alter table public.profiles add column if not exists pay_day integer not null default 1;
@@ -98,13 +100,71 @@ $$;
 revoke all on function public.is_email_available(text) from public;
 grant execute on function public.is_email_available(text) to anon, authenticated;
 
+create or replace function public.replace_my_transactions(replacement_rows jsonb)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  current_user_id uuid := auth.uid();
+begin
+  if current_user_id is null then
+    raise exception 'Authentication required';
+  end if;
+  if jsonb_typeof(replacement_rows) is distinct from 'array' then
+    raise exception 'Transaction replacement payload must be an array';
+  end if;
+
+  delete from public.transactions where user_id = current_user_id;
+
+  insert into public.transactions (
+    id, user_id, date, type, category_id, sub_id, direct_asset, goal_id, note, amount
+  )
+  select
+    row_data.id,
+    current_user_id,
+    row_data.date,
+    coalesce(nullif(row_data.type, ''), 'expense'),
+    row_data.category_id,
+    row_data.sub_id,
+    coalesce(row_data.direct_asset, false),
+    row_data.goal_id,
+    row_data.note,
+    row_data.amount
+  from jsonb_to_recordset(replacement_rows) as row_data(
+    id text,
+    date date,
+    type text,
+    category_id text,
+    sub_id text,
+    direct_asset boolean,
+    goal_id text,
+    note text,
+    amount numeric
+  );
+end;
+$$;
+
+revoke all on function public.replace_my_transactions(jsonb) from public, anon;
+grant execute on function public.replace_my_transactions(jsonb) to authenticated;
+
 create or replace function public.delete_my_account()
 returns void
 language plpgsql
-security definer set search_path = public
+security definer
+set search_path = ''
 as $$
+declare
+  current_user_id uuid := auth.uid();
 begin
-  delete from auth.users where id = auth.uid();
+  if current_user_id is null then
+    raise exception 'Authentication required';
+  end if;
+  delete from auth.users where id = current_user_id;
+  if not found then
+    raise exception 'Account not found';
+  end if;
 end;
 $$;
 
