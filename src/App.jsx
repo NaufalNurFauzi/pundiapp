@@ -540,29 +540,69 @@ function ProgressBar({ percent, color }) {
 
 function SpendingTrendChart({ user, transactions }) {
   const [hoveredPeriod, setHoveredPeriod] = useState(null);
+  const [selectedPeriodId, setSelectedPeriodId] = useState(null);
+  const [viewMode, setViewMode] = useState("total");
   const periods = getSalaryPeriods(user);
   const trendPeriods = (periods.length ? periods : [getActivePeriod(user)]).slice(-6);
   const values = trendPeriods.map((period) => ({
     id: period.id,
+    period,
     label: `Periode mulai ${dateLabel(period.startDate)}`,
     shortLabel: dateAtLocalMidnight(period.startDate).toLocaleDateString("id-ID", { day: "numeric", month: "short" }),
+    endDate: getPeriodEnd(period, periods) || todayStr(),
     total: transactionsForPeriod(transactions, period, periods)
       .filter(isExpenseTx)
       .reduce((sum, transaction) => sum + Number(transaction.amount), 0),
-  }));
-  const maxValue = Math.max(...values.map((value) => value.total), 1);
+  })).map((value) => {
+    const days = Math.max(1, Math.round((dateAtLocalMidnight(value.endDate) - dateAtLocalMidnight(value.period.startDate)) / 86400000) + 1);
+    return { ...value, days, average: value.total / days };
+  });
+  const selectedId = values.some((value) => value.id === selectedPeriodId)
+    ? selectedPeriodId
+    : values.at(-1)?.id;
+  const selectedValue = values.find((value) => value.id === selectedId);
+  const selectedIndex = values.findIndex((value) => value.id === selectedId);
+  const previousValue = values[selectedIndex - 1];
+  const measureValue = (value) => viewMode === "daily" ? value.average : value.total;
+  const maxValue = Math.max(...values.map(measureValue), 1);
   const points = values.map((value, index) => ({
     ...value,
+    plottedValue: measureValue(value),
     x: values.length === 1 ? 210 : 52 + (index * 316) / (values.length - 1),
-    y: 128 - (value.total / maxValue) * 92,
+    y: 128 - (measureValue(value) / maxValue) * 92,
   }));
   const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
   const hoveredPoint = points.find((point) => point.id === hoveredPeriod);
+  const activePoint = hoveredPoint || points.find((point) => point.id === selectedId);
+  const previousMeasure = previousValue ? measureValue(previousValue) : null;
+  const selectedMeasure = selectedValue ? measureValue(selectedValue) : 0;
+  const changePercent = previousMeasure > 0
+    ? ((selectedMeasure - previousMeasure) / previousMeasure) * 100
+    : null;
 
   return (
-    <div className="spending-trend-chart flex flex-col gap-3">
-      <p className="muted text-xs uppercase tracking-wide">Tren Pengeluaran per Periode</p>
-      <svg width="100%" height="190" viewBox="0 0 420 190" preserveAspectRatio="xMidYMid meet" style={{ overflow: "visible" }}>
+    <div className="spending-trend-chart flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <p className="muted text-xs uppercase tracking-wide">Tren Pengeluaran</p>
+        <div className="flex gap-1" role="group" aria-label="Ukuran grafik pengeluaran">
+          {[
+            { id: "total", label: "Total" },
+            { id: "daily", label: "Rata-rata/hari" },
+          ].map((mode) => (
+            <button
+              key={mode.id}
+              type="button"
+              className="btn-ghost text-xs"
+              aria-pressed={viewMode === mode.id}
+              onClick={() => setViewMode(mode.id)}
+              style={viewMode === mode.id ? { borderColor: "var(--gold)", color: "var(--gold)", padding: "6px 10px" } : { padding: "6px 10px" }}
+            >
+              {mode.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <svg className="spending-trend-svg" viewBox="0 0 420 190" preserveAspectRatio="xMidYMid meet" style={{ overflow: "visible" }}>
         {[36, 82, 128].map((y) => <line key={y} x1="28" y1={y} x2="392" y2={y} stroke="var(--border)" strokeWidth="0.5" opacity="0.5" />)}
         <path d={path} fill="none" stroke="var(--gold)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
         {points.map((point) => (
@@ -570,22 +610,57 @@ function SpendingTrendChart({ user, transactions }) {
             key={point.id}
             onMouseEnter={() => setHoveredPeriod(point.id)}
             onMouseLeave={() => setHoveredPeriod(null)}
-            style={{ cursor: "pointer" }}
+            onClick={() => setSelectedPeriodId(point.id)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                setSelectedPeriodId(point.id);
+              }
+            }}
+            role="button"
+            tabIndex={0}
+            aria-label={`${point.label}: ${rupiah(point.total)} total, rata-rata ${rupiah(point.average)} per hari`}
+            aria-pressed={selectedId === point.id}
+            style={{ cursor: "pointer", outline: "none" }}
           >
             <rect x={point.x - 48} y="16" width="96" height="128" fill="transparent" />
-            <circle cx={point.x} cy={point.y} r={hoveredPeriod === point.id ? 6 : 4} fill="var(--gold)" stroke={hoveredPeriod === point.id ? "var(--text)" : "none"} strokeWidth="1.5" />
-            <text x={point.x} y="158" textAnchor="middle" fontSize="11" fill="var(--muted)">{point.shortLabel}</text>
-            <title>{`${point.label}: ${rupiah(point.total)}`}</title>
+            {selectedId === point.id && <circle cx={point.x} cy={point.y} r="9" fill="var(--gold)" opacity=".18" />}
+            <circle cx={point.x} cy={point.y} r={hoveredPeriod === point.id || selectedId === point.id ? 5.5 : 4} fill="var(--gold)" stroke={selectedId === point.id ? "var(--text)" : "none"} strokeWidth="1.5" />
+            <text x={point.x} y="158" textAnchor="middle" fontSize="11" fill={selectedId === point.id ? "var(--text)" : "var(--muted)"}>{point.shortLabel}</text>
+            <title>{`${point.label}: ${rupiah(point.total)} total, ${rupiah(point.average)} per hari`}</title>
           </g>
         ))}
-        {hoveredPoint && (
+        {activePoint && (
           <g pointerEvents="none">
-            <rect x={hoveredPoint.x > 300 ? hoveredPoint.x - 158 : hoveredPoint.x + 10} y="12" width="148" height="44" rx="6" fill="var(--surface)" stroke="var(--gold)" />
-            <text x={hoveredPoint.x > 300 ? hoveredPoint.x - 148 : hoveredPoint.x + 20} y="29" fontSize="10" fill="var(--muted)">{hoveredPoint.shortLabel}</text>
-            <text x={hoveredPoint.x > 300 ? hoveredPoint.x - 148 : hoveredPoint.x + 20} y="46" fontSize="11" fill="var(--text)" fontWeight="700">{rupiah(hoveredPoint.total)}</text>
+            <rect x={activePoint.x > 300 ? activePoint.x - 158 : activePoint.x + 10} y="8" width="148" height="50" rx="6" fill="var(--surface)" stroke="var(--gold)" />
+            <text x={activePoint.x > 300 ? activePoint.x - 148 : activePoint.x + 20} y="25" fontSize="10" fill="var(--muted)">{activePoint.shortLabel} · {activePoint.days} hari</text>
+            <text x={activePoint.x > 300 ? activePoint.x - 148 : activePoint.x + 20} y="43" fontSize="11" fill="var(--text)" fontWeight="700">
+              {viewMode === "daily" ? rupiah(activePoint.average) : rupiah(activePoint.total)}
+              {viewMode === "daily" ? " / hari" : ""}
+            </text>
           </g>
         )}
       </svg>
+      {selectedValue && (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-end justify-between gap-3">
+            <div>
+              <p className="muted text-xs">{dateLabel(selectedValue.period.startDate)} – {dateLabel(selectedValue.endDate)}</p>
+              <p className="display tabular" style={{ fontSize: 18, fontWeight: 700 }}>
+                {rupiah(selectedValue.total)}
+                <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}> · {rupiah(selectedValue.average)}/hari</span>
+              </p>
+            </div>
+            {previousValue && (
+              <p className="text-xs text-right" style={{ color: changePercent === null ? "var(--muted)" : changePercent > 0 ? "var(--rose)" : changePercent < 0 ? "var(--teal)" : "var(--muted)" }}>
+                {changePercent === null
+                  ? "Belum ada pembanding"
+                  : `${changePercent > 0 ? "+" : ""}${changePercent.toFixed(1)}% vs periode sebelumnya`}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -850,12 +925,12 @@ function AllocationRing({ categories, centerLabel, centerValue }) {
     : null;
   const bg = stops ? `conic-gradient(${stops})` : "var(--surface2)";
   return (
-    <div className="allocation-ring flex flex-col items-center gap-5 text-center">
-      <div className="relative" style={{ width: 190, height: 190 }}>
-        <div style={{ width: 190, height: 190, borderRadius: "9999px", background: bg }} />
+    <div className="allocation-ring flex flex-col items-center gap-3 text-center">
+      <div className="allocation-ring-chart relative">
+        <div className="allocation-ring-disc" style={{ borderRadius: "9999px", background: bg }} />
         <div
           className="card absolute flex flex-col items-center justify-center"
-          style={{ top: 26, left: 26, width: 138, height: 138, borderRadius: "9999px" }}
+          style={{ inset: "14%", borderRadius: "9999px" }}
         >
           <span className="muted" style={{ fontSize: 11 }}>{centerLabel}</span>
           <span className="display tabular" style={{ fontSize: 15, fontWeight: 700, textAlign: "center" }}>
@@ -863,7 +938,7 @@ function AllocationRing({ categories, centerLabel, centerValue }) {
           </span>
         </div>
       </div>
-      <div className="flex flex-wrap justify-center gap-x-5 gap-y-2">
+      <div className="allocation-ring-legend flex flex-wrap justify-center gap-x-4 gap-y-1.5">
         {categories.map((c, i) => (
           <div key={c.id} className="flex items-center gap-2 text-sm">
             <span
@@ -1724,7 +1799,7 @@ function AppFooter() {
       >
         @naufalnurf__
       </a>
-      <span className="muted"> · v1.3.7</span>
+      <span className="muted"> · v1.3.8</span>
     </footer>
   );
 }
@@ -1851,11 +1926,11 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
           </div>
         )}
 
-        <div className="grid gap-6" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
-          <div className="card p-6 anim-pop stagger-1">
+        <div className="dashboard-analytics-grid grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))" }}>
+          <div className="dashboard-analytics-card card p-5 anim-pop stagger-1">
             <AllocationRing categories={user.categories} centerLabel="Total Income" centerValue={effectiveIncome} />
           </div>
-          <div className="card p-6 anim-pop stagger-1">
+          <div className="dashboard-analytics-card card p-5 anim-pop stagger-1">
             <SpendingTrendChart user={user} transactions={transactions} />
           </div>
         </div>
@@ -5626,8 +5701,19 @@ const STYLE = `
 }
 .mmp-app .card2{ transition: transform .15s ease, border-color .15s ease, background .15s ease; }
 .mmp-app .cat-card{ cursor:pointer; }
-.mmp-app .allocation-ring{ width:100%; justify-content:center; }
-.mmp-app .spending-trend-chart{ width:100%; min-height:100%; }
+.mmp-app .dashboard-analytics-grid{ align-items:stretch; }
+.mmp-app .dashboard-analytics-card{ min-width:0; display:flex; align-items:stretch; }
+.mmp-app .allocation-ring{ width:100%; height:100%; justify-content:space-evenly; }
+.mmp-app .allocation-ring-chart{
+  width:clamp(150px, 18vw, 176px);
+  aspect-ratio:1;
+  flex:0 0 auto;
+}
+.mmp-app .allocation-ring-disc{ width:100%; height:100%; }
+.mmp-app .allocation-ring-legend{ max-width:100%; }
+.mmp-app .allocation-ring-legend > *{ font-size:12px; }
+.mmp-app .spending-trend-chart{ width:100%; height:100%; min-width:0; justify-content:space-between; }
+.mmp-app .spending-trend-svg{ display:block; width:100%; height:auto; aspect-ratio:420 / 190; }
 .mmp-app .cat-card:hover{ transform: translateY(-3px); border-color: var(--gold); }
 .mmp-app input, .mmp-app select{ transition: border-color .15s ease; }
 
@@ -5708,6 +5794,10 @@ const STYLE = `
   .mmp-app .card2.p-5{ padding:16px; }
   .mmp-app .card2.p-4{ padding:12px; }
   .mmp-app .card2.p-3{ padding:10px; }
+  .mmp-app .dashboard-analytics-grid{ gap:12px; }
+  .mmp-app .dashboard-analytics-card{ padding:16px; }
+  .mmp-app .allocation-ring-chart{ width:160px; }
+  .mmp-app .spending-trend-svg{ max-height:180px; }
 
   .mmp-app .p-4.md\\:p-8{ padding:16px; }
   .mmp-app .p-4.md\\:p-6{ padding:16px; }
