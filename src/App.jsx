@@ -151,6 +151,35 @@ function transactionBorrowedAmount(transaction) {
   }
   return Number(transaction.amount || 0);
 }
+function transactionBorrowedFromAssetAmount(transaction, user) {
+  if (!transaction.borrowedFromCategoryId) return 0;
+  const assetCategoryIds = new Set(getAssetCategoryCatalog(user).map((category) => category.id));
+  return assetCategoryIds.has(transaction.borrowedFromCategoryId)
+    ? transactionBorrowedAmount(transaction)
+    : 0;
+}
+function assetLoanRepayments(user, categoryId, subId = undefined) {
+  return getSalaryPeriods(user).flatMap((period) => period.allocationRepayments || [])
+    .filter((repayment) =>
+      repayment.toCategoryId === categoryId &&
+      (subId === undefined || (repayment.toSubId || null) === (subId || null))
+    )
+    .reduce((sum, repayment) => sum + Number(repayment.amount || 0), 0);
+}
+function assetLoanRepaymentTotalForPeriod(user, period) {
+  const assetCategoryIds = new Set(getAssetCategoryCatalog(user).map((category) => category.id));
+  return (period.allocationRepayments || [])
+    .filter((repayment) => assetCategoryIds.has(repayment.toCategoryId))
+    .reduce((sum, repayment) => sum + Number(repayment.amount || 0), 0);
+}
+function assetLoanRepaymentsForPeriod(period, categoryId, subId = undefined) {
+  return (period.allocationRepayments || [])
+    .filter((repayment) =>
+      repayment.toCategoryId === categoryId &&
+      (subId === undefined || (repayment.toSubId || null) === (subId || null))
+    )
+    .reduce((sum, repayment) => sum + Number(repayment.amount || 0), 0);
+}
 function allocationBudgetSpent(transactions, categoryId) {
   return transactions.filter((transaction) => isExpenseTx(transaction) && !transaction.directAsset)
     .reduce((sum, transaction) => {
@@ -339,9 +368,11 @@ function getPeriodCashRemainder(user, transactions, period, beforeDate = null) {
     .filter((transaction) => transaction.type === "topup")
     .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
   const spent = periodTransactions.filter(isExpenseTx)
-    .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+    .reduce((sum, transaction) =>
+      sum + Number(transaction.amount || 0) - transactionBorrowedFromAssetAmount(transaction, user), 0);
+  const assetRepayments = assetLoanRepaymentTotalForPeriod(user, period);
   const carriedIn = (period.carryovers || []).reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  return Math.max(0, Number(period.amount || 0) + carriedIn + additionalIncome - spent);
+  return Math.max(0, Number(period.amount || 0) + carriedIn + additionalIncome - spent - assetRepayments);
 }
 function isPaydayReminderDue(user, today = todayStr()) {
   const payDay = Math.max(1, Math.min(31, Number(user.payDay) || 1));
@@ -403,14 +434,25 @@ function getAssetCategoryCatalog(user) {
 
 /* Asset deposits and withdrawals remain attached to their historical category
    even after that category is removed from the current allocation plan. */
-function assetBalance(transactions, catId, subId = undefined, user = null) {
+function assetBalance(transactions, catId, subId = undefined, user = null, excludedTransactionId = null) {
+  const balanceTransactions = excludedTransactionId
+    ? transactions.filter((transaction) => transaction.id !== excludedTransactionId)
+    : transactions;
   const assetCategoryIds = new Set(user ? getAssetCategoryCatalog(user).map((category) => category.id) : []);
   const matches = (t) => t.categoryId === catId && (subId === undefined ? true : (t.subId || null) === subId);
-  const deposits = transactions.filter((t) => matches(t) && (
+  const deposits = balanceTransactions.filter((t) => matches(t) && (
     isDepositTx(t) || (assetCategoryIds.has(t.categoryId) && isAssetMonthlyDepositTx(t))
   )).reduce((s, t) => s + Number(t.amount), 0);
-  const withdrawals = transactions.filter((t) => matches(t) && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
-  return deposits - withdrawals;
+  const withdrawals = balanceTransactions.filter((t) => matches(t) && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
+  const loans = user
+    ? balanceTransactions.filter((transaction) =>
+      isExpenseTx(transaction) &&
+      transaction.borrowedFromCategoryId === catId &&
+      assetCategoryIds.has(catId) &&
+      (subId === undefined || (transaction.borrowedFromSubId || null) === (subId || null))
+    ).reduce((sum, transaction) => sum + transactionBorrowedAmount(transaction), 0)
+    : 0;
+  return deposits + (user ? assetLoanRepayments(user, catId, subId) : 0) - withdrawals - loans;
 }
 
 /* True "sisa saldo" — a running cash balance that rolls forward across periods.
@@ -424,8 +466,12 @@ function cumulativeBalanceUpTo(user, transactions, dateLimit) {
     .reduce((sum, period) => sum + Number(period.amount || 0), 0);
   const txUpTo = transactions.filter((t) => t.date <= dateLimit);
   const totalTopup = txUpTo.filter(isTopupTx).reduce((s, t) => s + Number(t.amount), 0);
-  const totalExpense = txUpTo.filter(isExpenseTx).reduce((s, t) => s + Number(t.amount), 0);
-  return totalIncome + totalTopup - totalExpense;
+  const totalExpense = txUpTo.filter(isExpenseTx).reduce((sum, transaction) =>
+    sum + Number(transaction.amount) - transactionBorrowedFromAssetAmount(transaction, user), 0);
+  const totalAssetRepayments = getSalaryPeriods(user)
+    .filter((period) => period.startDate <= dateLimit)
+    .reduce((sum, period) => sum + assetLoanRepaymentTotalForPeriod(user, period), 0);
+  return totalIncome + totalTopup - totalExpense - totalAssetRepayments;
 }
 
 async function readKey(key, shared = true) {
@@ -1821,7 +1867,9 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
   const effectiveIncome = income + globalTopup;
   const totalSpent = expenses.reduce((s, t) => s + Number(t.amount), 0);
   const cashIncome = income + totalTopup;
-  const thisMonthNet = cashIncome - totalSpent;
+  const thisMonthNet = cashIncome - expenses.reduce((sum, transaction) =>
+    sum + Number(transaction.amount || 0) - transactionBorrowedFromAssetAmount(transaction, user), 0) -
+    assetLoanRepaymentTotalForPeriod(user, activePeriod);
   const balance = cumulativeBalanceUpTo(user, transactions, todayStr());
   const assetCatalog = getAssetCategoryCatalog(user);
   const activeAssetIds = new Set(user.categories.filter((category) => category.isAsset).map((category) => category.id));
@@ -1834,7 +1882,9 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
 
   const spentFor = (catId) => allocationBudgetSpent(expenses, catId);
   const withdrawFor = (catId) => monthTx.filter((t) => t.categoryId === catId && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
-  const assetDepositFor = (catId) => monthTx.filter((t) => t.categoryId === catId && isAssetMonthlyDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0);
+  const assetDepositFor = (catId) =>
+    monthTx.filter((t) => t.categoryId === catId && isAssetMonthlyDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0) +
+    assetLoanRepaymentsForPeriod(activePeriod, catId);
   const directTopupFor = (catId) => topups.filter((t) => t.categoryId === catId && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const subTopupFor = (catId) => topups.filter((t) => t.categoryId === catId && t.subId).reduce((s, t) => s + Number(t.amount), 0);
 
@@ -1960,9 +2010,7 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
                   </div>
                   <p className="muted text-xs mb-1">{fmtPercent(c.percent)}% dari income</p>
                   {carryover > 0 && <p className="text-xs mb-1" style={{ color: "var(--teal)" }}>+{rupiah(carryover)} saldo periode lalu</p>}
-                  {!c.isAsset && (
-                    <AllocationLoanNote user={user} transactions={monthTx} categoryId={c.id} />
-                  )}
+                  <AllocationLoanNote user={user} transactions={monthTx} categoryId={c.id} />
                   {c.isAsset ? (
                     <>
                       <p className="muted text-xs">Saldo total aset</p>
@@ -2061,7 +2109,8 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const categoryCarryover = periodCarryoverAmount(activePeriod, cat.id);
   const allocated = baseAllocated + directTopup + subTopupTotal + categoryCarryover;
   const monthTx = allMonthTx.filter((t) => t.categoryId === cat.id);
-  const deposited = monthTx.filter(isAssetMonthlyDepositTx).reduce((s, t) => s + Number(t.amount), 0);
+  const deposited = monthTx.filter(isAssetMonthlyDepositTx).reduce((s, t) => s + Number(t.amount), 0) +
+    assetLoanRepaymentsForPeriod(activePeriod, cat.id);
   const spent = isAsset ? deposited : allocationBudgetSpent(allMonthTx, cat.id);
   const withdrawn = monthTx.filter(isWithdrawTx).reduce((s, t) => s + Number(t.amount), 0);
   const netAssetMovement = isAsset ? deposited - withdrawn : spent;
@@ -2080,7 +2129,8 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
 
   const spentForSub = (sid) => isAsset
     ? monthTx.filter((transaction) => transaction.subId === sid && isAssetMonthlyDepositTx(transaction))
-      .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0)
+      .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0) +
+      assetLoanRepaymentsForPeriod(activePeriod, cat.id, sid)
     : allocationSubSpent(allMonthTx, cat.id, sid);
   const withdrawnForSub = (sid) => monthTx.filter((t) => t.subId === sid && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const topupForSub = (sid) => monthTx.filter((t) => t.subId === sid && isTopupTx(t)).reduce((s, t) => s + Number(t.amount), 0);
@@ -2104,16 +2154,17 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
     return "";
   };
   const spendingRemaining = isAsset ? remaining : subAllocationRemaining(subId);
-  const sourceCategory = user.categories.find((category) => category.id === borrowedFromCategoryId && !category.isAsset);
+  const sourceCategory = user.categories.find((category) => category.id === borrowedFromCategoryId);
   const sourceSub = sourceCategory?.subs?.find((sub) => sub.id === borrowedFromSubId);
   const requiredBorrowAmount = Math.max(0, Number(amount || 0) - Math.max(0, spendingRemaining));
   const sourceRemaining = sourceCategory
-    ? (sourceSub
+    ? (sourceCategory.isAsset
+      ? assetBalance(transactions, sourceCategory.id, sourceSub?.id, user)
+      : sourceSub
       ? allocationSubRemaining(user, transactions, activePeriod, sourceCategory.id, sourceSub.id)
       : allocationRemaining(user, transactions, activePeriod, sourceCategory.id))
     : 0;
   const eligibleBorrowSources = (targetSubId) => user.categories
-    .filter((category) => !category.isAsset)
     .flatMap((category) => {
       if (category.id !== cat.id) {
         return [
@@ -2201,7 +2252,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
       return;
     }
     if (borrowedAmount > sourceRemaining) {
-      setFormError(`Pinjaman yang dibutuhkan ${rupiah(borrowedAmount)}, tetapi sisa alokasi "${allocationSourceName(user, sourceCategory.id, sourceSub?.id)}" hanya ${rupiah(sourceRemaining)}.`);
+      setFormError(`Pinjaman yang dibutuhkan ${rupiah(borrowedAmount)}, tetapi sisa ${sourceCategory.isAsset ? "aset" : "alokasi"} "${allocationSourceName(user, sourceCategory.id, sourceSub?.id)}" hanya ${rupiah(sourceRemaining)}.`);
       return;
     }
     onAddTx({
@@ -2325,7 +2376,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
           )}
         </div>
 
-        {!isAsset && hasPeriodLoans && (
+        {hasPeriodLoans && (
           <div className="card p-4">
             <p className="muted text-xs uppercase tracking-wide mb-1">Pinjaman alokasi · periode ini</p>
             <AllocationLoanNote user={user} transactions={allMonthTx} categoryId={cat.id} />
@@ -2592,10 +2643,10 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
             ) : (
               <>
                 <p className="muted text-sm mb-4">
-                  Pengeluaran tetap dicatat sebagai {cat.name}; saldo alokasi atau sub-alokasi yang dipilih akan digunakan sebagai sumber dana.
+                  Pengeluaran tetap dicatat sebagai {cat.name}; saldo alokasi, sub-alokasi, atau aset yang dipilih akan digunakan sebagai sumber dana.
                 </p>
                 <div className="flex flex-col gap-3">
-                  <Field label="Pinjam dari alokasi atau sub-alokasi">
+                  <Field label="Sumber pinjaman">
                     <select
                       value={JSON.stringify([borrowedFromCategoryId, borrowedFromSubId || null])}
                       onChange={(event) => {
@@ -2607,12 +2658,14 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
                       {borrowSourceOptions.map((source) => {
                         const category = user.categories.find((item) => item.id === source.categoryId);
                         const sub = category?.subs?.find((item) => item.id === source.subId);
-                        const available = sub
-                          ? allocationSubRemaining(user, transactions, activePeriod, category.id, sub.id)
-                          : allocationRemaining(user, transactions, activePeriod, category.id);
+                        const available = category.isAsset
+                          ? assetBalance(transactions, category.id, sub?.id, user)
+                          : sub
+                            ? allocationSubRemaining(user, transactions, activePeriod, category.id, sub.id)
+                            : allocationRemaining(user, transactions, activePeriod, category.id);
                         return (
                           <option key={`${source.categoryId}:${source.subId || ""}`} value={JSON.stringify([source.categoryId, source.subId])}>
-                            {source.categoryId === cat.id ? "↳ " : ""}{allocationSourceName(user, source.categoryId, source.subId)} · sisa {rupiah(available)}
+                            {source.categoryId === cat.id ? "↳ " : ""}{allocationSourceName(user, source.categoryId, source.subId)}{category.isAsset ? " · aset" : ""} · sisa {rupiah(available)}
                           </option>
                         );
                       })}
@@ -2859,7 +2912,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
                 <div className="card2 p-3 flex flex-col gap-3">
                   <div>
                     <p className="text-sm font-medium">Sesuaikan pinjaman alokasi</p>
-                    <p className="muted text-xs">Nominal yang diisi akan mengurangi alokasi peminjam dan menambah alokasi sumber pada periode baru.</p>
+                    <p className="muted text-xs">Nominal yang diisi mengurangi alokasi peminjam dan mengembalikan dana ke alokasi atau saldo aset sumber.</p>
                   </div>
                   {outstandingLoans.map((loan) => {
                     const borrower = salaryCategories.find((category) => category.id === loan.fromCategoryId);
@@ -3036,7 +3089,9 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
   const effectiveIncome = selectedIncome + globalTopup;
   const totalSpent = expenses.reduce((s, t) => s + Number(t.amount), 0);
   const cashIncome = selectedIncome + totalTopup;
-  const thisMonthNet = cashIncome - totalSpent;
+  const thisMonthNet = cashIncome - expenses.reduce((sum, transaction) =>
+    sum + Number(transaction.amount || 0) - transactionBorrowedFromAssetAmount(transaction, user), 0) -
+    assetLoanRepaymentTotalForPeriod(user, selectedPeriod);
   const selectedEnd = getPeriodEnd(selectedPeriod, periods) || todayStr();
   const balance = cumulativeBalanceUpTo(user, transactions, selectedEnd);
   const prevCarry = balance - thisMonthNet;
@@ -3044,8 +3099,18 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
   const directTopupForCat = (catId) => topups.filter((t) => t.categoryId === catId && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const topupForSub = (catId, subId) => topups.filter((t) => t.categoryId === catId && t.subId === subId).reduce((s, t) => s + Number(t.amount), 0);
   const spentForCat = (catId) => allocationBudgetSpent(expenses, catId);
-  const assetDepositForCat = (catId) => monthT.filter((t) => t.categoryId === catId && isAssetMonthlyDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0);
-  const spentForSub = (catId, subId) => allocationSubSpent(expenses, catId, subId);
+  const assetDepositForCat = (catId) =>
+    monthT.filter((t) => t.categoryId === catId && isAssetMonthlyDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0) +
+    assetLoanRepaymentsForPeriod(selectedPeriod, catId);
+  const spentForSub = (catId, subId) => {
+    const category = historyCategories.find((item) => item.id === catId);
+    return category?.isAsset
+      ? monthT.filter((transaction) =>
+        transaction.categoryId === catId && transaction.subId === subId && isAssetMonthlyDepositTx(transaction)
+      ).reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0) +
+        assetLoanRepaymentsForPeriod(selectedPeriod, catId, subId)
+      : allocationSubSpent(expenses, catId, subId);
+  };
 
   const monthTxSorted = [...monthT].sort((a, b) => (a.date < b.date ? 1 : -1));
   const filteredTx = search.trim()
@@ -4337,7 +4402,7 @@ function EditTransactionModal({ tx, cat, categories = [], user, transactions = [
   const [error, setError] = useState("");
   const transactionCategory = categories.find((category) => category.id === tx.categoryId) || cat;
   const canBorrow = isExpenseTx(tx) && !tx.directAsset && transactionCategory && !transactionCategory.isAsset;
-  const lenderCategories = categories.filter((category) => !category.isAsset);
+  const lenderCategories = categories;
   const topup = isTopupTx(tx);
   const assetOpening = isAssetOpeningTx(tx);
   const withdraw = isWithdrawTx(tx);
@@ -4347,7 +4412,7 @@ function EditTransactionModal({ tx, cat, categories = [], user, transactions = [
     const amt = Number(amount);
     if (!(amt > 0)) { setError("Jumlah harus lebih dari 0."); return; }
     if (canBorrow && borrowedFromCategoryId) {
-      const lender = categories.find((category) => category.id === borrowedFromCategoryId && !category.isAsset);
+      const lender = categories.find((category) => category.id === borrowedFromCategoryId);
       const lenderSub = lender?.subs?.find((sub) => sub.id === borrowedFromSubId);
       if (!lender || (borrowedFromSubId && !lenderSub) ||
           (lender.id === tx.categoryId && (!subId || !lenderSub || lenderSub.id === subId))) {
@@ -4363,12 +4428,14 @@ function EditTransactionModal({ tx, cat, categories = [], user, transactions = [
           : allocationRemaining(user, transactions, transactionPeriod, tx.categoryId, tx.id)))
         : 0;
       const available = user && transactionPeriod
-        ? (lenderSub
-          ? allocationSubRemaining(user, transactions, transactionPeriod, lender.id, lenderSub.id, tx.id)
-          : allocationRemaining(user, transactions, transactionPeriod, lender.id, tx.id))
+        ? (lender.isAsset
+          ? assetBalance(transactions, lender.id, lenderSub?.id, user, tx.id)
+          : lenderSub
+            ? allocationSubRemaining(user, transactions, transactionPeriod, lender.id, lenderSub.id, tx.id)
+            : allocationRemaining(user, transactions, transactionPeriod, lender.id, tx.id))
         : 0;
       if (requiredBorrowAmount > available) {
-        setError(`Sisa alokasi "${allocationSourceName(user, lender.id, lenderSub?.id)}" tidak mencukupi. Sisa saat ini ${rupiah(available)}.`);
+        setError(`Sisa ${lender.isAsset ? "aset" : "alokasi"} "${allocationSourceName(user, lender.id, lenderSub?.id)}" tidak mencukupi. Sisa saat ini ${rupiah(available)}.`);
         return;
       }
       onSave({
@@ -4417,7 +4484,7 @@ function EditTransactionModal({ tx, cat, categories = [], user, transactions = [
           {canBorrow && lenderCategories.some((category) =>
             category.id !== tx.categoryId || (subId && category.subs?.some((sub) => sub.id !== subId))
           ) && (
-            <Field label="Sumber alokasi pinjaman">
+            <Field label="Sumber pinjaman">
               <select
                 value={borrowedFromCategoryId ? JSON.stringify([borrowedFromCategoryId, borrowedFromSubId || null]) : ""}
                 onChange={(event) => {
@@ -4434,13 +4501,13 @@ function EditTransactionModal({ tx, cat, categories = [], user, transactions = [
                 <option value="">Tidak ada pinjaman</option>
                 {lenderCategories.flatMap((category) => [
                   ...(category.id !== tx.categoryId
-                    ? [<option key={category.id} value={JSON.stringify([category.id, null])}>{category.name}</option>]
+                    ? [<option key={category.id} value={JSON.stringify([category.id, null])}>{category.name}{category.isAsset ? " · aset" : ""}</option>]
                     : []),
                   ...(category.subs || [])
                     .filter((sub) => category.id !== tx.categoryId || (subId && sub.id !== subId))
                     .map((sub) => (
                       <option key={`${category.id}:${sub.id}`} value={JSON.stringify([category.id, sub.id])}>
-                        ↳ {category.name} / {sub.name}
+                        ↳ {category.name}{category.isAsset ? " · aset" : ""} / {sub.name}
                       </option>
                     )),
                 ])}
