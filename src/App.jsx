@@ -2563,17 +2563,19 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
               const subName = transactionCategory?.subs.find((s) => s.id === t.subId)?.name;
               const topup = isTopupTx(t);
               const withdraw = isWithdrawTx(t);
-              const positive = topup || (isAsset && !withdraw); // setor & topup are "adds", tarik is "reduces"
+              const lent = isAsset && isExpenseTx(t) &&
+                t.borrowedFromCategoryId === cat.id && t.categoryId !== cat.id;
+              const positive = topup || (isAsset && !withdraw && !lent);
               const displayAmount = t.borrowedFromCategoryId === cat.id && t.categoryId !== cat.id
                 ? transactionBorrowedAmount(t)
                 : t.amount;
-              const label = withdraw ? "Tarik" : topup ? "Tambahan dana" : isAssetOpeningTx(t) ? "Saldo awal aset" : isAsset ? "Setor" : null;
+              const label = withdraw ? "Tarik" : topup ? "Tambahan dana" : lent ? "Dipinjamkan" : isAssetOpeningTx(t) ? "Saldo awal aset" : isAsset ? "Setor" : null;
               return (
                 <div key={t.id} className="card2 p-3 flex items-center justify-between anim-fade-up" style={{ animationDelay: `${Math.min(hi, 8) * 40}ms` }}>
                   <div>
                     <p className="text-sm">
                       {t.note || subName || (t.borrowedFromCategoryId === cat.id
-                        ? allocationCategoryName(user, t.categoryId)
+                        ? lent ? `Dipinjamkan ke ${allocationCategoryName(user, t.categoryId)}` : allocationCategoryName(user, t.categoryId)
                         : label || cat.name)}
                     </p>
                     <p className="muted text-xs">
