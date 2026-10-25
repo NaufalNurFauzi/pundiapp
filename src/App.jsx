@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { Component, useState, useEffect, useMemo, useRef } from "react";
 import { authCallbackUrl, authRecoveryUrl, supabase } from "./lib/supabase";
 import {
   LogIn, UserPlus, ArrowRight, ArrowLeft, Check, Pencil, Plus, Trash2,
@@ -1685,7 +1685,7 @@ function AllocationEditor({ user, onSave, onCancel, onLogout, initialCategories,
 
   return (
     <div className={embedded ? "modal-overlay anim-fade" : "min-h-screen"} onClick={embedded ? onCancel : undefined}>
-      <div className={embedded ? "card p-4 anim-pop" : ""} style={embedded ? { maxWidth: 760, maxHeight: "92vh", width: "100%", overflowY: "auto" } : undefined} onClick={embedded ? (event) => event.stopPropagation() : undefined}>
+      <div className={embedded ? "card p-4 anim-pop allocation-editor-modal" : ""} style={embedded ? { maxWidth: 760, width: "100%" } : undefined} onClick={embedded ? (event) => event.stopPropagation() : undefined}>
       {!embedded && <TopBar name={user.name} onLogout={onLogout} right={
         <button className="btn-ghost text-sm flex items-center gap-2" onClick={onCancel}><ArrowLeft size={14} /> Batal</button>
       } />}
@@ -1850,7 +1850,7 @@ function AppFooter() {
   );
 }
 
-function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout, onEditAlloc, onAddMoney, onViewHistory, onOpenSettings, onOpenGoals, onOpenCalculator, onDismissIncomeReminder }) {
+function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout, onEditAlloc, onAddMoney, onAddSalary, onViewHistory, onOpenSettings, onOpenGoals, onOpenCalculator, onDismissIncomeReminder }) {
   const periods = getSalaryPeriods(user);
   const activePeriod = getActivePeriod(user);
   const openAllocationLoans = getOutstandingAllocationLoans(user, transactions);
@@ -1909,15 +1909,20 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
                 Periode gaji terakhir dimulai <b>{dateLabel(activePeriod.startDate)}</b>. Saat gaji berikutnya diterima, catat lewat <b>Tambah Uang · Gaji Bulanan</b>.
               </p>
             </div>
-            <button
-              type="button"
-              className="icon-btn"
-              onClick={onDismissIncomeReminder}
-              aria-label="Tutup pemberitahuan periode gaji"
-              title="Tutup pemberitahuan"
-            >
-              <X size={16} />
-            </button>
+            <div className="flex items-center gap-2">
+              <button type="button" className="btn-primary text-sm flex items-center gap-2" onClick={onAddSalary}>
+                <Plus size={14} /> Catat Gaji Bulanan
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={onDismissIncomeReminder}
+                aria-label="Tutup pemberitahuan periode gaji"
+                title="Tutup pemberitahuan"
+              >
+                <X size={16} />
+              </button>
+            </div>
           </div>
         )}
 
@@ -2706,9 +2711,40 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
 
 /* ---------- App ---------- */
 /* ---------- Add money modal ---------- */
+class AddMoneyModalBoundary extends Component {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error) {
+    console.error("Add money modal render failed", error);
+  }
+
+  render() {
+    if (!this.state.hasError) return this.props.children;
+    return (
+      <div className="modal-overlay anim-fade" role="alert">
+        <div className="card p-6" style={{ maxWidth: 440, width: "100%" }}>
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="display" style={{ fontSize: 18, fontWeight: 700 }}>Formulir gaji tidak dapat dimuat</h2>
+            <button className="icon-btn" onClick={this.props.onClose} aria-label="Tutup formulir"><X size={18} /></button>
+          </div>
+          <p className="muted text-sm mt-3">Data alokasi akun ini tidak dapat ditampilkan. Tutup formulir, lalu muat ulang halaman.</p>
+          <button className="btn-primary mt-4" onClick={this.props.onClose}>Tutup</button>
+        </div>
+      </div>
+    );
+  }
+}
+
 function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, initialTarget = "global" }) {
+  const userCategories = Array.isArray(user.categories)
+    ? user.categories.filter((category) => category && typeof category === "object")
+    : [];
   const [target, setTarget] = useState(initialTarget); // global | category | sub | asset | asset_opening | salary
-  const [categoryId, setCategoryId] = useState(user.categories[0]?.id || "");
+  const [categoryId, setCategoryId] = useState(userCategories[0]?.id || "");
   const [subId, setSubId] = useState("");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
@@ -2719,7 +2755,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
   const [salaryAllocationMode, setSalaryAllocationMode] = useState("previous");
   const [customSalaryCategories, setCustomSalaryCategories] = useState(null);
   const [carryoverEnabled, setCarryoverEnabled] = useState(true);
-  const [carryoverCategoryId, setCarryoverCategoryId] = useState(user.categories[0]?.id || "");
+  const [carryoverCategoryId, setCarryoverCategoryId] = useState(userCategories[0]?.id || "");
   const [carryoverSubId, setCarryoverSubId] = useState("");
   const [repaymentAmounts, setRepaymentAmounts] = useState(() => {
     const existingPeriod = getSalaryPeriods(user).find((period) => period.startDate === todayStr());
@@ -2732,12 +2768,17 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
   const [salaryError, setSalaryError] = useState("");
   const [salaryBusy, setSalaryBusy] = useState(false);
 
-  const assetCategories = user.categories.filter((c) => c.isAsset);
-  const cat = user.categories.find((c) => c.id === categoryId);
-  const previousCategories = activePeriod.categories || user.categories;
-  const salaryCategories = salaryAllocationMode === "custom" && customSalaryCategories
+  const assetCategories = userCategories.filter((c) => c.isAsset);
+  const cat = userCategories.find((c) => c.id === categoryId);
+  const previousCategories = Array.isArray(activePeriod.categories)
+    ? activePeriod.categories.filter((category) => category && typeof category === "object")
+    : userCategories;
+  const salaryCategories = (salaryAllocationMode === "custom" && customSalaryCategories
     ? customSalaryCategories
-    : previousCategories;
+    : previousCategories).map((category) => ({
+      ...category,
+      subs: Array.isArray(category.subs) ? category.subs : [],
+    })).filter((category) => category.id);
   const previousSalaryPeriod = getSalaryPeriods(user)
     .filter((period) => period.startDate < salaryDate)
     .at(-1);
@@ -2754,11 +2795,11 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
     if (nextTarget === "asset" || nextTarget === "asset_opening") {
       setCategoryId(assetCategories[0]?.id || "");
     } else if (nextTarget === "global") {
-      setCategoryId(user.categories[0]?.id || "");
+      setCategoryId(userCategories[0]?.id || "");
     } else if (nextTarget === "salary") {
       setSalaryError("");
-    } else if (!user.categories.some((category) => category.id === categoryId)) {
-      setCategoryId(user.categories[0]?.id || "");
+    } else if (!userCategories.some((category) => category.id === categoryId)) {
+      setCategoryId(userCategories[0]?.id || "");
     }
   };
 
@@ -2858,8 +2899,8 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
   return (
     <div className="modal-overlay anim-fade" onClick={onClose}>
       <div
-        className={`card p-6 anim-pop add-money-modal${target === "salary" ? " add-money-modal-salary" : ""}`}
-        style={{ maxWidth: 440, width: "100%", ...(target === "salary" ? { maxHeight: "min(88dvh, 760px)" } : {}) }}
+        className="card p-6 anim-pop add-money-modal"
+        style={{ maxWidth: 440, width: "100%" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-1">
@@ -2870,7 +2911,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
           Catat gaji baru atau tambahkan dana ke alokasi dan aset.
         </p>
 
-        <div className={`flex flex-col gap-4 add-money-modal-content${target === "salary" ? " add-money-modal-content-salary" : ""}`}>
+        <div className="flex flex-col gap-4 add-money-modal-content">
           <Field label="Tujuan dana">
             <div className={`flex gap-2 flex-wrap${target === "salary" ? " salary-target-list" : ""}`}>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "salary")} onClick={() => chooseTarget("salary")}>Gaji Bulanan</button>
@@ -2921,7 +2962,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
                     const lender = salaryCategories.find((category) => category.id === loan.toCategoryId);
                     const borrowerSub = borrower?.subs?.find((sub) => sub.id === loan.fromSubId);
                     const lenderSub = lender?.subs?.find((sub) => sub.id === loan.toSubId);
-                    const borrowerAllocation = borrower ? salary * borrower.percent / 100 : 0;
+                    const borrowerAllocation = borrower ? (Number(salaryAmount) || 0) * borrower.percent / 100 : 0;
                     const maxRepayment = borrower
                       ? Math.min(loan.amount, loan.fromSubId && borrowerSub
                         ? borrowerAllocation * borrowerSub.percent / 100
@@ -2976,11 +3017,11 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
                           {salaryCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
                         </select>
                       </Field>
-                      {carryoverCategory.subs.length > 0 && (
+                      {(carryoverCategory.subs || []).length > 0 && (
                         <Field label="Sub-alokasi tujuan">
                           <select value={carryoverSubId} onChange={(event) => setCarryoverSubId(event.target.value)}>
                             <option value="">Tambahkan ke alokasi kategori</option>
-                            {carryoverCategory.subs.map((sub) => <option key={sub.id} value={sub.id}>{sub.name}</option>)}
+                            {(carryoverCategory.subs || []).map((sub) => <option key={sub.id} value={sub.id}>{sub.name}</option>)}
                           </select>
                         </Field>
                       )}
@@ -2994,7 +3035,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
                 </button>
               )}
               {salaryError && <div className="flex items-center gap-2 text-sm" style={{ color: "var(--rose)" }}><AlertCircle size={14} /> {salaryError}</div>}
-              <button className="btn-primary flex items-center justify-center gap-2 mt-1 salary-submit" onClick={submit} disabled={!(Number(salaryAmount) > 0) || salaryBusy}>
+              <button className="btn-primary flex items-center justify-center gap-2 mt-1" onClick={submit} disabled={!(Number(salaryAmount) > 0) || salaryBusy}>
                 <Check size={16} /> {salaryBusy ? "Menyimpan..." : "Mulai Periode Baru"}
               </button>
             </>
@@ -3004,7 +3045,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
           {(target === "category" || target === "sub" || target === "asset" || target === "asset_opening") && (
             <Field label="Kategori">
               <select value={categoryId} onChange={(e) => chooseCategory(e.target.value)}>
-               {(target === "asset" || target === "asset_opening" ? assetCategories : user.categories).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+               {(target === "asset" || target === "asset_opening" ? assetCategories : userCategories).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
             </Field>
           )}
@@ -5608,6 +5649,7 @@ export default function App() {
           onOpenCategory={(id) => { setActiveCategoryId(id); setPage("category"); }}
           onEditAlloc={() => setPage("editAlloc")}
           onAddMoney={() => setShowAddMoney("global")}
+          onAddSalary={() => setShowAddMoney("salary")}
           onViewHistory={() => setPage("monthlyHistory")}
           onOpenSettings={() => setPage("settings")}
           onOpenGoals={() => setPage("goals")}
@@ -5642,14 +5684,16 @@ export default function App() {
         />
       )}
       {showAddMoney && (
-        <AddMoneyModal
-          user={user}
-          transactions={transactions}
-          initialTarget={showAddMoney === "salary" ? "salary" : "global"}
-          onClose={() => setShowAddMoney(false)}
-          onSubmit={(tx) => { handleAddTx(tx); setShowAddMoney(false); }}
-          onSalarySubmit={handleConfirmMonthIncome}
-        />
+        <AddMoneyModalBoundary onClose={() => setShowAddMoney(false)}>
+          <AddMoneyModal
+            user={user}
+            transactions={transactions}
+            initialTarget={showAddMoney === "salary" ? "salary" : "global"}
+            onClose={() => setShowAddMoney(false)}
+            onSubmit={(tx) => { handleAddTx(tx); setShowAddMoney(false); }}
+            onSalarySubmit={handleConfirmMonthIncome}
+          />
+        </AddMoneyModalBoundary>
       )}
       {showResetAccount && (
         <ResetAccountModal
@@ -5804,27 +5848,22 @@ const STYLE = `
   display:flex; align-items:center; justify-content:center; z-index: 50; padding: 16px;
   backdrop-filter: blur(2px);
 }
-.mmp-app .add-money-modal-salary{
-  display:flex;
-  flex-direction:column;
-  min-height:0;
-  overflow:hidden;
-}
-.mmp-app .add-money-modal-content-salary{
-  flex:1 1 auto;
-  min-height:0;
+.mmp-app .add-money-modal,
+.mmp-app .allocation-editor-modal{
+  max-height:calc(100vh - 32px);
+  max-height:calc(100dvh - 32px);
   overflow-y:auto;
   overscroll-behavior:contain;
   scrollbar-width:thin;
   scrollbar-color:var(--border) transparent;
-  scroll-behavior:smooth;
-  padding:0 6px 4px 0;
-  gap:12px;
 }
-.mmp-app .add-money-modal-content-salary::-webkit-scrollbar{ width:6px; }
-.mmp-app .add-money-modal-content-salary::-webkit-scrollbar-track{ background:transparent; }
-.mmp-app .add-money-modal-content-salary::-webkit-scrollbar-thumb{ background:var(--border); border-radius:9999px; }
-.mmp-app .add-money-modal-content-salary::-webkit-scrollbar-thumb:hover{ background:var(--gold); }
+.mmp-app .add-money-modal::-webkit-scrollbar,
+.mmp-app .allocation-editor-modal::-webkit-scrollbar{ width:6px; }
+.mmp-app .add-money-modal::-webkit-scrollbar-thumb,
+.mmp-app .allocation-editor-modal::-webkit-scrollbar-thumb{
+  background:var(--border);
+  border-radius:9999px;
+}
 .mmp-app .salary-target-list{
   display:grid;
   grid-template-columns:repeat(2, minmax(0, 1fr));
@@ -5835,13 +5874,6 @@ const STYLE = `
   white-space:normal;
 }
 .mmp-app .salary-target-list > button:last-child{ grid-column:1 / -1; }
-.mmp-app .salary-submit{
-  position:sticky;
-  bottom:0;
-  z-index:1;
-  flex-shrink:0;
-  box-shadow:0 -8px 14px var(--surface);
-}
 .mmp-app .check-badge{
   width:56px; height:56px; border-radius:9999px; background:var(--gold);
   display:flex; align-items:center; justify-content:center; margin: 0 auto;
@@ -5915,8 +5947,10 @@ const STYLE = `
 
   .mmp-app .modal-overlay{ align-items:flex-start; overflow-y:auto; padding:12px; }
   .mmp-app .modal-overlay > .card{ margin:auto 0; max-height:calc(100vh - 24px); overflow-y:auto; }
-  .mmp-app .modal-overlay > .add-money-modal-salary{ overflow:hidden; }
-
+  .mmp-app .modal-overlay > .add-money-modal,
+  .mmp-app .modal-overlay > .allocation-editor-modal{
+    max-height:calc(100dvh - 24px);
+  }
   .mmp-app .cat-card{ width:100%; min-width:0; }
   .mmp-app [style*="grid-template-columns"]{ grid-template-columns:1fr !important; }
   .mmp-app [style*="minWidth"]{ min-width:0 !important; }
