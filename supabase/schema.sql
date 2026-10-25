@@ -128,12 +128,13 @@ begin
   delete from public.transactions where user_id = current_user_id;
 
   insert into public.transactions (
-    id, user_id, date, type, category_id, sub_id, direct_asset, goal_id, borrowed_from_category_id, borrowed_from_sub_id, borrowed_amount, note, amount
+    id, user_id, date, created_at, type, category_id, sub_id, direct_asset, goal_id, borrowed_from_category_id, borrowed_from_sub_id, borrowed_amount, note, amount
   )
   select
     row_data.id,
     current_user_id,
     row_data.date,
+    coalesce(row_data.created_at, now()),
     coalesce(nullif(row_data.type, ''), 'expense'),
     row_data.category_id,
     row_data.sub_id,
@@ -147,6 +148,7 @@ begin
   from jsonb_to_recordset(replacement_rows) as row_data(
     id text,
     date date,
+    created_at timestamptz,
     type text,
     category_id text,
     sub_id text,
