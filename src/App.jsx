@@ -2145,7 +2145,6 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
                   </div>
                   <p className="muted text-xs mb-1">{fmtPercent(c.percent)}% dari income</p>
                   {carryover > 0 && <p className="text-xs mb-1" style={{ color: "var(--teal)" }}>+{rupiah(carryover)} saldo periode lalu</p>}
-                  <AllocationLoanNote user={user} transactions={monthTx} categoryId={c.id} />
                   {c.isAsset ? (
                     <>
                       <p className="muted text-xs">Saldo total aset</p>
