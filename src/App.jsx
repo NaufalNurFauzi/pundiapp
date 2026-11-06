@@ -962,9 +962,6 @@ function DailySpendingChart({ monthTx, periodStart, periodEnd, subCategories = [
         </div>
       </div>
 
-      <div className="chart-legend flex flex-wrap gap-x-4 gap-y-1 text-xs muted">
-        {series.map((item) => <span key={item.id} className="flex items-center gap-1.5"><i style={{ width: 9, height: 9, borderRadius: "50%", background: item.color }} />{item.name}</span>)}
-      </div>
       <svg width="100%" height={chartHeight + 40} viewBox={`0 0 440 ${chartHeight + 40}`} preserveAspectRatio="xMidYMid meet" style={{ overflow: "visible" }}>
         {[0, 0.25, 0.5, 0.75, 1].map((ratio, i) => (
           <line
@@ -1085,6 +1082,9 @@ function DailySpendingChart({ monthTx, periodStart, periodEnd, subCategories = [
         <span>Hari ke-1</span>
         <span>Setiap titik = total pengeluaran hari itu</span>
         <span>{dayCount} hari</span>
+      </div>
+      <div className="chart-legend flex flex-wrap gap-x-4 gap-y-1 text-xs muted">
+        {series.map((item) => <span key={item.id} className="flex items-center gap-1.5"><i style={{ width: 9, height: 9, borderRadius: "50%", background: item.color }} />{item.name}</span>)}
       </div>
     </div>
   );
@@ -2330,9 +2330,9 @@ function AllocationEditor({ user, onSave, onCancel, onLogout, initialCategories,
 }
 
 /* ---------- Dashboard ---------- */
-function TopBar({ name, onLogout, right }) {
+function TopBar({ name, onLogout, right, sticky = true }) {
   return (
-    <div className="app-topbar flex items-center justify-between p-4 md:p-6" style={{ borderBottom: "1px solid var(--border)" }}>
+    <div className={`app-topbar flex items-center justify-between p-4 md:p-6${sticky ? " app-topbar-sticky" : ""}`} style={{ borderBottom: "1px solid var(--border)" }}>
       <div className="app-topbar-brand flex items-center gap-2">
         <Wallet size={20} color="var(--gold)" />
         <span className="display" style={{ fontWeight: 700 }}>Pundi</span>
@@ -2407,6 +2407,7 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
       <TopBar
         name={user.name}
         onLogout={onLogout}
+        sticky
         right={
           <>
             <button className="btn-ghost text-sm flex items-center gap-2" onClick={onEditAlloc}><Pencil size={14} /> Edit Alokasi</button>
@@ -2854,6 +2855,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
       <TopBar
         name={user.name}
         onLogout={onLogout}
+        sticky
         right={<button className="btn-ghost text-sm flex items-center gap-2" onClick={onBack}><ArrowLeft size={14} /> Dashboard</button>}
       />
       <div className="p-4 md:p-8 max-w-3xl mx-auto flex flex-col gap-6 anim-fade-up">
@@ -3039,9 +3041,6 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
               max={todayStr()}
               onChange={(e) => { setDate(e.target.value); setFormError(""); }}
             />
-            <p className="muted text-xs w-full">
-              Transaksi baru hanya bisa dicatat pada periode aktif. Koreksi transaksi periode sebelumnya tersedia di Riwayat Periode.
-            </p>
             <input
               style={{ flex: 1, minWidth: 160 }}
               placeholder="Catatan (opsional)"
@@ -3697,9 +3696,6 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
               onChange={(e) => { setDate(e.target.value); setTransactionError(""); }}
             />
           </Field>
-          <p className="muted text-xs">
-            Transaksi baru hanya bisa dicatat pada periode aktif. Untuk transaksi periode sebelumnya, gunakan koreksi melalui Riwayat Periode.
-          </p>
           <Field label="Catatan (opsional)">
             <input value={note} onChange={(e) => setNote(e.target.value)} onKeyDown={onEnter(submit)} placeholder="cth. Bonus kerja" />
           </Field>
@@ -3955,11 +3951,11 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
           </div>
         )}
 
-        <div className="flex gap-2 flex-wrap">
+        <div className="monthly-history-period-tabs flex gap-2">
           {historyPeriods.map((period) => (
             <button
               key={period.id}
-              className="btn-ghost text-sm"
+              className="btn-ghost text-sm monthly-history-period-tab"
               style={period.id === selectedPeriod.id ? { borderColor: "var(--gold)", color: "var(--gold)" } : {}}
               onClick={() => { setSelectedId(period.id); setExpandedCat(null); }}
             >
@@ -3975,10 +3971,10 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
             <div>
               <p className="muted text-xs uppercase tracking-wide">Income efektif</p>
               <p className="tabular" style={{ fontWeight: 700 }}>{rupiah(cashIncome)}</p>
-              {totalTopup > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--teal)" }}>termasuk +{rupiah(totalTopup)} tambahan</p>}
-              {totalAssetTopup > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--gold)" }}>termasuk +{rupiah(totalAssetTopup)} penambahan aset</p>}
-              {totalAssetOpening > 0 && <p className="text-xs mt-0.5" style={{ color: "var(--teal)" }}>+{rupiah(totalAssetOpening)} saldo awal aset</p>}
-              {!hasIncomeRecord && <p className="text-xs mt-0.5 muted">*belum ada input income khusus bulan ini, pakai income terakhir yang diketahui</p>}
+              {totalTopup > 0 && <p className="monthly-history-summary-caption text-xs mt-0.5" style={{ color: "var(--teal)" }}>termasuk +{rupiah(totalTopup)} tambahan</p>}
+              {totalAssetTopup > 0 && <p className="monthly-history-summary-caption text-xs mt-0.5" style={{ color: "var(--gold)" }}>termasuk +{rupiah(totalAssetTopup)} penambahan aset</p>}
+              {totalAssetOpening > 0 && <p className="monthly-history-summary-caption text-xs mt-0.5" style={{ color: "var(--teal)" }}>+{rupiah(totalAssetOpening)} saldo awal aset</p>}
+              {!hasIncomeRecord && <p className="monthly-history-summary-caption text-xs mt-0.5 muted">*belum ada input income khusus bulan ini, pakai income terakhir yang diketahui</p>}
             </div>
             <div>
               <p className="muted text-xs uppercase tracking-wide">Total pengeluaran</p>
@@ -3987,7 +3983,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
             <div>
               <p className="muted text-xs uppercase tracking-wide">Sisa saldo</p>
               <p className="tabular" style={{ fontWeight: 700, color: "var(--teal)" }}>{rupiah(balance)}</p>
-              {prevCarry !== 0 && <p className="text-xs mt-0.5 muted">termasuk {rupiah(prevCarry)} bawaan bulan sebelumnya</p>}
+              {prevCarry !== 0 && <p className="monthly-history-summary-caption text-xs mt-0.5 muted">termasuk {rupiah(prevCarry)} bawaan bulan sebelumnya</p>}
             </div>
             <div>
               <p className="muted text-xs uppercase tracking-wide">Total saldo aset</p>
@@ -6573,6 +6569,12 @@ const STYLE = `
   --text:#20281F; --muted:#6B7266; --border:#DCD5C6;
 }
 .mmp-app .display{ font-family:'Space Grotesk',sans-serif; }
+.mmp-app .app-topbar-sticky{
+  position:sticky;
+  top:0;
+  z-index:100;
+  background:var(--bg);
+}
 .mmp-app .card{ background:var(--surface); border:1px solid var(--border); border-radius:16px; }
 .mmp-app .card2{ background:var(--surface2); border:1px solid var(--border); border-radius:12px; }
 .mmp-app .muted{ color:var(--muted); }
@@ -6581,7 +6583,22 @@ const STYLE = `
   background:var(--surface2); border:1px solid var(--border); color:var(--text);
   border-radius:8px; padding:9px 12px; outline:none; width:100%; font-size:14px;
 }
-.mmp-app input[type="date"]{ min-width:0; max-width:100%; }
+.mmp-app input[type="date"]{
+  box-sizing:border-box;
+  min-width:0;
+  max-width:100%;
+  height:42px;
+  line-height:20px;
+  padding-block:9px;
+}
+.mmp-app input[type="date"]::-webkit-date-and-time-value{
+  min-height:20px;
+  text-align:left;
+}
+.mmp-app input[type="date"]::-webkit-calendar-picker-indicator{
+  margin:0;
+  padding:0;
+}
 .mmp-app .transaction-date-input{
   flex:0 1 160px;
   width:160px;
@@ -6723,7 +6740,7 @@ const STYLE = `
 }
 
 @media (max-width: 640px){
-  .mmp-app{ overflow-x:hidden; }
+  .mmp-app{ overflow-x:clip; }
   .mmp-app *{ box-sizing:border-box; }
   .mmp-app .min-h-screen{ min-height:100dvh; }
   .mmp-app .app-topbar{ align-items:flex-start; flex-wrap:wrap; gap:12px; padding:14px 16px; }
@@ -6742,17 +6759,29 @@ const STYLE = `
   .mmp-app .dashboard-analytics-card{ padding:16px; }
   .mmp-app .allocation-ring-chart{ width:160px; }
   .mmp-app .spending-trend-svg{ max-height:180px; }
-  .mmp-app .monthly-history-summary-metrics{
-    display:flex;
-    flex-wrap:nowrap;
+  .mmp-app .monthly-history-period-tabs{
+    width:100%;
     overflow-x:auto;
+    flex-wrap:nowrap;
+    padding-bottom:4px;
     scrollbar-width:thin;
+    -webkit-overflow-scrolling:touch;
   }
-  .mmp-app .monthly-history-summary-metrics > *{
-    flex:1 0 140px;
-    min-width:140px;
+  .mmp-app .monthly-history-period-tab{
+    flex:0 0 auto;
+    white-space:nowrap;
   }
-  .mmp-app .monthly-history-summary-metrics .tabular{ white-space:nowrap; }
+  .mmp-app .summary-metrics.monthly-history-summary-metrics{
+    display:grid;
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+    gap:10px;
+    overflow:visible;
+  }
+  .mmp-app .summary-metrics.monthly-history-summary-metrics > *{
+    min-width:0;
+  }
+  .mmp-app .summary-metrics.monthly-history-summary-metrics .tabular{ white-space:nowrap; }
+  .mmp-app .monthly-history-summary-caption{ display:none; }
   .mmp-app .monthly-history-allocation-row{ gap:8px; min-width:0; }
   .mmp-app .monthly-history-allocation-name{ flex:1 1 auto; min-width:0; }
   .mmp-app .monthly-history-allocation-label{
@@ -6781,6 +6810,7 @@ const STYLE = `
   .mmp-app .summary-metrics{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }
   .mmp-app .summary-metrics > *{ min-width:0; }
   .mmp-app .summary-metrics > :last-child{ grid-column:1 / -1; }
+  .mmp-app .summary-metrics.monthly-history-summary-metrics > :last-child{ grid-column:auto; }
   .mmp-app .transaction-amount{ font-size:12px; line-height:1.25; white-space:nowrap; }
   .mmp-app .sub-allocation-amount{ font-size:12px; line-height:1.25; }
   .mmp-app .transaction-form{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }
@@ -6807,6 +6837,8 @@ const STYLE = `
     font-size:13px;
     padding-left:8px;
     padding-right:6px;
+    height:42px;
+    line-height:20px;
   }
   .mmp-app .transaction-form > input[type="date"]{ grid-column:1 / -1; }
   .mmp-app .transaction-form > input[placeholder*="Catatan"]{ min-width:0 !important; }
@@ -6909,6 +6941,10 @@ const STYLE = `
   }
   .mmp-app .dashboard-summary-metrics > :nth-child(2),
   .mmp-app .dashboard-summary-metrics > :nth-child(4){
+    text-align:right;
+  }
+  .mmp-app .monthly-history-summary-metrics > :nth-child(2),
+  .mmp-app .monthly-history-summary-metrics > :nth-child(4){
     text-align:right;
   }
   .mmp-app .dashboard-summary-metrics .tabular{
