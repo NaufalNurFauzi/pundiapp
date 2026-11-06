@@ -116,6 +116,24 @@ function getActivePeriod(user) {
     categories: user.categories,
   };
 }
+function newTransactionDateError(user, value) {
+  const activePeriodStart = getActivePeriod(user).startDate;
+  const today = todayStr();
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return "Tanggal transaksi tidak valid.";
+  }
+  const parsedDate = dateAtLocalMidnight(value);
+  if (Number.isNaN(parsedDate.getTime()) || dateString(parsedDate) !== value) {
+    return "Tanggal transaksi tidak valid.";
+  }
+  if (value < activePeriodStart || value > today) {
+    return `Transaksi baru hanya bisa dicatat pada periode aktif (${dateLabel(activePeriodStart)}–${dateLabel(today)}). Untuk transaksi periode sebelumnya, gunakan koreksi melalui Riwayat Periode.`;
+  }
+  return "";
+}
+function salaryPeriodIdForDate(user, value) {
+  return getSalaryPeriods(user).filter((period) => period.startDate <= value).at(-1)?.id || null;
+}
 function getPeriodEnd(period, periods = []) {
   const nextPeriod = periods.find((item) => item.startDate > period.startDate);
   return nextPeriod ? addDays(nextPeriod.startDate, -1) : null;
@@ -1050,6 +1068,162 @@ function DailySpendingChart({ monthTx, periodStart, periodEnd, subCategories = [
         <span>Hari ke-1</span>
         <span>Setiap titik = total pengeluaran hari itu</span>
         <span>{dayCount} hari</span>
+      </div>
+    </div>
+  );
+}
+
+function AssetBalanceChart({ user, categoryId, transactions }) {
+  const [hoveredIndex, setHoveredIndex] = useState(null);
+  const assetCategoryIds = new Set(getAssetCategoryCatalog(user).map((category) => category.id));
+  const events = [];
+  const addEvent = (date, amount) => {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(amount) && amount !== 0) {
+      events.push({ date, amount });
+    }
+  };
+
+  transactions.forEach((transaction) => {
+    const amount = Number(transaction.amount || 0);
+    if (transaction.categoryId === categoryId && (
+      isDepositTx(transaction) ||
+      (assetCategoryIds.has(categoryId) && isAssetMonthlyDepositTx(transaction))
+    )) {
+      addEvent(transaction.date, amount);
+    }
+    if (transaction.categoryId === categoryId && isWithdrawTx(transaction)) {
+      addEvent(transaction.date, -amount);
+    }
+    if (isExpenseTx(transaction) &&
+      transaction.borrowedFromCategoryId === categoryId &&
+      assetCategoryIds.has(categoryId)) {
+      addEvent(transaction.date, -transactionBorrowedAmount(transaction));
+    }
+  });
+
+  getSalaryPeriods(user).forEach((period) => {
+    (period.allocationRepayments || []).forEach((repayment) => {
+      const amount = Number(repayment.amount || 0);
+      if (repayment.toCategoryId === categoryId) addEvent(period.startDate, amount);
+      if (assetCategoryIds.has(categoryId) && repayment.fromCategoryId === categoryId) {
+        addEvent(period.startDate, -amount);
+      }
+    });
+  });
+
+  if (events.length === 0) {
+    return (
+      <div className="flex flex-col gap-2">
+        <p className="muted text-xs uppercase tracking-wide">Grafik saldo aset</p>
+        <p className="muted text-sm">Grafik akan dimulai setelah saldo awal atau transaksi aset dicatat.</p>
+      </div>
+    );
+  }
+
+  const eventsByDate = new Map();
+  events.forEach(({ date, amount }) => eventsByDate.set(date, (eventsByDate.get(date) || 0) + amount));
+  const firstDate = events.reduce((earliest, event) => event.date < earliest ? event.date : earliest, events[0].date);
+  const lastDate = events.reduce((latest, event) => event.date > latest ? event.date : latest, todayStr());
+  const days = [];
+  let balance = 0;
+  for (let day = dateAtLocalMidnight(firstDate), end = dateAtLocalMidnight(lastDate); day <= end; day.setDate(day.getDate() + 1)) {
+    const date = dateString(day);
+    balance += eventsByDate.get(date) || 0;
+    days.push({ date, balance });
+  }
+
+  const chartHeight = 140;
+  const chartLeft = 58;
+  const chartRight = 408;
+  const chartWidth = chartRight - chartLeft;
+  const minBalance = Math.min(0, ...days.map((day) => day.balance));
+  const maxBalance = Math.max(0, ...days.map((day) => day.balance), 1);
+  const balanceRange = maxBalance - minBalance || 1;
+  const points = days.map((day, index) => ({
+    ...day,
+    x: chartLeft + (index / Math.max(days.length - 1, 1)) * chartWidth,
+    y: chartHeight - ((day.balance - minBalance) / balanceRange) * chartHeight,
+  }));
+  const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+  const labelStep = Math.max(1, Math.ceil(days.length / 7));
+  const activeIndex = hoveredIndex === null ? days.length - 1 : hoveredIndex;
+  const activeDay = days[activeIndex];
+  const shortAmount = (value) => {
+    const absValue = Math.abs(value);
+    const formatted = absValue >= 1000000
+      ? `${(absValue / 1000000).toFixed(absValue >= 10000000 ? 0 : 1)}jt`
+      : absValue >= 1000 ? `${Math.round(absValue / 1000)}rb` : String(Math.round(absValue));
+    return `${value < 0 ? "-" : ""}${formatted}`;
+  };
+  const moveHover = (event) => {
+    const svgBounds = event.currentTarget.ownerSVGElement.getBoundingClientRect();
+    const chartX = ((event.clientX - svgBounds.left) / svgBounds.width) * 440;
+    const index = Math.round(((chartX - chartLeft) / chartWidth) * (days.length - 1));
+    setHoveredIndex(Math.max(0, Math.min(days.length - 1, index)));
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div>
+        <p className="muted text-xs uppercase tracking-wide">Grafik saldo aset kumulatif</p>
+        <p className="muted text-xs mt-1">Saldo berjalan berdasarkan setoran, penarikan, dan perubahan aset lainnya.</p>
+      </div>
+      <svg width="100%" height={chartHeight + 34} viewBox={`0 0 440 ${chartHeight + 34}`} preserveAspectRatio="xMidYMid meet" style={{ overflow: "visible" }}>
+        {[0, 0.5, 1].map((ratio) => {
+          const value = minBalance + balanceRange * ratio;
+          const y = chartHeight - chartHeight * ratio;
+          return (
+            <g key={ratio}>
+              <line x1={chartLeft} y1={y} x2={chartRight} y2={y} stroke="var(--border)" strokeWidth="0.5" opacity="0.5" />
+              <text x={chartLeft - 7} y={y + 3} textAnchor="end" fontSize="9" fill="var(--muted)">{shortAmount(value)}</text>
+            </g>
+          );
+        })}
+        <path d={path} fill="none" stroke="var(--teal)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        {activeDay && (
+          <>
+            <line x1={points[activeIndex].x} y1="0" x2={points[activeIndex].x} y2={chartHeight} stroke="var(--muted)" strokeDasharray="3 3" opacity="0.6" />
+            <circle cx={points[activeIndex].x} cy={points[activeIndex].y} r="4" fill="var(--teal)" stroke="var(--surface)" strokeWidth="2" />
+          </>
+        )}
+        {days.filter((_, index) => index % labelStep === 0 || index === days.length - 1).map((day) => {
+          const index = days.indexOf(day);
+          return (
+            <text key={day.date} x={points[index].x} y={chartHeight + 20} textAnchor="middle" fontSize="9" fill="var(--muted)">
+              {dateAtLocalMidnight(day.date).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: days.length > 365 ? "2-digit" : undefined })}
+            </text>
+          );
+        })}
+        <rect
+          x={chartLeft}
+          y="0"
+          width={chartWidth}
+          height={chartHeight}
+          fill="transparent"
+          style={{ cursor: "crosshair" }}
+          onMouseMove={moveHover}
+          onMouseLeave={() => setHoveredIndex(null)}
+          onFocus={() => setHoveredIndex(days.length - 1)}
+          onBlur={() => setHoveredIndex(null)}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+              event.preventDefault();
+              const nextIndex = activeIndex + (event.key === "ArrowRight" ? 1 : -1);
+              setHoveredIndex(Math.max(0, Math.min(days.length - 1, nextIndex)));
+            }
+          }}
+          tabIndex={0}
+          role="slider"
+          aria-label="Saldo aset kumulatif per hari"
+          aria-valuemin={0}
+          aria-valuemax={days.length - 1}
+          aria-valuenow={activeIndex}
+          aria-valuetext={`${dateLabel(activeDay.date)}: ${rupiah(activeDay.balance)}`}
+        />
+      </svg>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <p className="muted text-xs">{dateLabel(activeDay.date)}</p>
+        <p className="tabular" style={{ fontWeight: 700, color: "var(--teal)" }}>{rupiah(activeDay.balance)}</p>
       </div>
     </div>
   );
@@ -2318,7 +2492,9 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const relevantLoans = getOutstandingAllocationLoans(user, transactions)
     .filter((loan) => loan.fromCategoryId === cat.id || loan.toCategoryId === cat.id);
 
-  const submitSetor = () => {
+  const submitSetor = async () => {
+    const dateError = newTransactionDateError(user, date);
+    if (dateError) { setFormError(dateError); return; }
     const amt = Number(amount);
     if (!(amt > 0)) { setFormError("Masukkan jumlah yang valid."); return; }
     if (amt > spendingRemaining) {
@@ -2337,7 +2513,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
       return;
     }
     setFormError("");
-    onAddTx({
+    const saved = await onAddTx({
       id: uid(),
       type: "expense",
       categoryId: cat.id,
@@ -2349,7 +2525,9 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
       borrowedFromSubId: null,
       borrowedAmount: 0,
     });
-    setAmount(""); setNote(""); setSubId("");
+    if (saved !== false) {
+      setAmount(""); setNote(""); setSubId("");
+    }
   };
   const continueBorrow = () => {
     setBorrowPromptStage("source");
@@ -2361,7 +2539,9 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
     setBorrowedFromCategoryId("");
     setBorrowedFromSubId("");
   };
-  const submitBorrow = () => {
+  const submitBorrow = async () => {
+    const dateError = newTransactionDateError(user, date);
+    if (dateError) { setFormError(dateError); return; }
     const amt = Number(amount);
     if (!(amt > 0)) {
       setFormError("Masukkan jumlah yang valid.");
@@ -2381,7 +2561,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
       setFormError(`Pinjaman yang dibutuhkan ${rupiah(borrowedAmount)}, tetapi sisa ${sourceCategory.isAsset ? "aset" : "alokasi"} "${allocationSourceName(user, sourceCategory.id, sourceSub?.id)}" hanya ${rupiah(sourceRemaining)}.`);
       return;
     }
-    onAddTx({
+    const saved = await onAddTx({
       id: uid(),
       type: "expense",
       categoryId: cat.id,
@@ -2393,21 +2573,25 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
       borrowedFromSubId: sourceSub?.id || null,
       borrowedAmount,
     });
-    setAmount(""); setNote(""); setSubId("");
-    cancelBorrow();
+    if (saved !== false) {
+      setAmount(""); setNote(""); setSubId("");
+      cancelBorrow();
+    }
   };
-  const submitTarik = () => {
+  const submitTarik = async () => {
+    const dateError = newTransactionDateError(user, date);
+    if (dateError) { setFormError(dateError); return; }
     const amt = Number(amount);
     if (!(amt > 0)) { setFormError("Masukkan jumlah yang valid."); return; }
     const cap = subId ? assetBalance(transactions, cat.id, subId, user) : catSaldo;
     if (amt > cap) { setFormError(`Saldo tidak mencukupi. Saldo tersedia saat ini ${rupiah(cap)}.`); return; }
     setFormError("");
-    onAddTx({ id: uid(), type: "withdraw", categoryId: cat.id, subId: subId || null, amount: amt, note: note.trim(), date });
-    setAmount(""); setNote(""); setSubId("");
+    const saved = await onAddTx({ id: uid(), type: "withdraw", categoryId: cat.id, subId: subId || null, amount: amt, note: note.trim(), date });
+    if (saved !== false) { setAmount(""); setNote(""); setSubId(""); }
   };
   const submit = () => (isAsset && assetMode === "tarik" ? submitTarik() : submitSetor());
 
-  const recordRecurring = (r) => {
+  const recordRecurring = async (r) => {
     const err = checkBalance(r.amount, r.subId);
     if (err) {
       const available = subAllocationRemaining(r.subId);
@@ -2429,7 +2613,8 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
       return;
     }
     setRecError("");
-    onAddTx({ id: uid(), type: "expense", categoryId: cat.id, subId: r.subId || null, amount: r.amount, note: r.name, date: todayStr() });
+    const saved = await onAddTx({ id: uid(), type: "expense", categoryId: cat.id, subId: r.subId || null, amount: r.amount, note: r.name, date: todayStr() });
+    if (saved === false) setRecError("Transaksi belum berhasil disimpan. Coba lagi.");
   };
   const addRecurringTemplate = () => {
     if (!recName.trim() || !(Number(recAmount) > 0)) return;
@@ -2529,7 +2714,11 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
           </div>
         )}
 
-        {!isAsset && (
+        {isAsset ? (
+          <div className="card p-6">
+            <AssetBalanceChart user={user} categoryId={cat.id} transactions={transactions} />
+          </div>
+        ) : (
           <div className="card p-6">
             <DailySpendingChart
               monthTx={monthTx}
@@ -2614,7 +2803,18 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
                 {cat.subs.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
             )}
-            <input className="transaction-date-input" style={{ maxWidth: 160 }} type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <input
+              className="transaction-date-input"
+              style={{ maxWidth: 160 }}
+              type="date"
+              value={date}
+              min={activePeriod.startDate}
+              max={todayStr()}
+              onChange={(e) => { setDate(e.target.value); setFormError(""); }}
+            />
+            <p className="muted text-xs w-full">
+              Transaksi baru hanya bisa dicatat pada periode aktif. Koreksi transaksi periode sebelumnya tersedia di Riwayat Periode.
+            </p>
             <input
               style={{ flex: 1, minWidth: 160 }}
               placeholder="Catatan (opsional)"
@@ -2916,6 +3116,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
   const [editingSalaryAllocation, setEditingSalaryAllocation] = useState(false);
   const [salaryError, setSalaryError] = useState("");
   const [salaryBusy, setSalaryBusy] = useState(false);
+  const [transactionError, setTransactionError] = useState("");
 
   const assetCategories = userCategories.filter((c) => c.isAsset);
   const cat = userCategories.find((c) => c.id === categoryId);
@@ -2947,6 +3148,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
   const chooseTarget = (nextTarget) => {
     setTarget(nextTarget);
     setSubId("");
+    setTransactionError("");
     if (nextTarget === "asset" || nextTarget === "asset_opening") {
       setCategoryId(assetCategories[0]?.id || "");
     } else if (nextTarget === "global") {
@@ -3050,11 +3252,16 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
       }
       return;
     }
+    const transactionDateMessage = newTransactionDateError(user, date);
+    if (transactionDateMessage) {
+      setTransactionError(transactionDateMessage);
+      return;
+    }
     const amt = Number(amount);
     if (!(amt > 0)) return;
     if ((target === "sub" || target === "asset" || target === "asset_opening") && !categoryId) return;
     if (target === "sub" && !subId) return;
-    onSubmit({
+    const saved = await onSubmit({
       id: uid(),
       type: target === "asset" || target === "asset_opening" ? "asset_opening" : "topup",
       categoryId: target === "global" ? null : categoryId,
@@ -3064,6 +3271,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
       date,
       directAsset: target === "asset" || target === "asset_opening",
     });
+    if (saved === false) setTransactionError("Transaksi belum berhasil disimpan. Coba lagi.");
   };
 
   const tabStyle = (active) => active ? { borderColor: "var(--gold)", color: "var(--gold)" } : {};
@@ -3087,9 +3295,9 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
           <Field label="Tujuan dana">
             <div className={`flex gap-2 flex-wrap${target === "salary" ? " salary-target-list" : ""}`}>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "salary")} onClick={() => chooseTarget("salary")}>Gaji Bulanan</button>
-              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "global")} onClick={() => setTarget("global")}>Seluruh Alokasi</button>
-              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "category")} onClick={() => setTarget("category")}>Kategori Tertentu</button>
-              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "sub")} onClick={() => setTarget("sub")}>Sub-alokasi Tertentu</button>
+              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "global")} onClick={() => { setTarget("global"); setTransactionError(""); }}>Seluruh Alokasi</button>
+              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "category")} onClick={() => { setTarget("category"); setTransactionError(""); }}>Kategori Tertentu</button>
+              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "sub")} onClick={() => { setTarget("sub"); setTransactionError(""); }}>Sub-alokasi Tertentu</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "asset" || target === "asset_opening")} onClick={() => chooseTarget("asset_opening")}>Saldo Awal Aset</button>
             </div>
           </Field>
@@ -3243,11 +3451,21 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
             <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="cth. 500000" />
           </Field>
           <Field label="Tanggal">
-            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <input
+              type="date"
+              value={date}
+              min={activePeriod.startDate}
+              max={todayStr()}
+              onChange={(e) => { setDate(e.target.value); setTransactionError(""); }}
+            />
           </Field>
+          <p className="muted text-xs">
+            Transaksi baru hanya bisa dicatat pada periode aktif. Untuk transaksi periode sebelumnya, gunakan koreksi melalui Riwayat Periode.
+          </p>
           <Field label="Catatan (opsional)">
             <input value={note} onChange={(e) => setNote(e.target.value)} onKeyDown={onEnter(submit)} placeholder="cth. Bonus kerja" />
           </Field>
+          {transactionError && <div role="alert" className="flex items-center gap-2 text-sm" style={{ color: "var(--rose)" }}><AlertCircle size={14} /> {transactionError}</div>}
 
           <button
             className="btn-primary flex items-center justify-center gap-2 mt-1"
@@ -4643,6 +4861,16 @@ function EditTransactionModal({ tx, cat, categories = [], user, transactions = [
   const submit = () => {
     const amt = Number(amount);
     if (!(amt > 0)) { setError("Jumlah harus lebih dari 0."); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+        dateString(dateAtLocalMidnight(date)) !== date ||
+        date > todayStr()) {
+      setError("Tanggal koreksi tidak valid atau berada di masa depan.");
+      return;
+    }
+    if (user && salaryPeriodIdForDate(user, tx.date) !== salaryPeriodIdForDate(user, date) &&
+        !window.confirm("Tanggal ini memindahkan transaksi ke periode gaji lain. Riwayat dan ringkasan alokasi periode tujuan akan berubah. Lanjutkan koreksi?")) {
+      return;
+    }
     if (canBorrow && borrowedFromCategoryId) {
       const lender = categories.find((category) => category.id === borrowedFromCategoryId);
       const lenderSub = lender?.subs?.find((sub) => sub.id === borrowedFromSubId);
@@ -4698,9 +4926,12 @@ function EditTransactionModal({ tx, cat, categories = [], user, transactions = [
     <div className="modal-overlay anim-fade" onClick={onClose}>
       <div className="card p-6 anim-pop" style={{ maxWidth: 400, width: "100%" }} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-1">
-          <h2 className="display" style={{ fontSize: 18, fontWeight: 700 }}>Edit {txLabel}</h2>
+          <h2 className="display" style={{ fontSize: 18, fontWeight: 700 }}>Koreksi {txLabel}</h2>
           <button className="icon-btn" onClick={onClose}><X size={18} /></button>
         </div>
+        <p className="muted text-xs mt-2">
+          Koreksi transaksi lama tetap diperbolehkan. Jika tanggal dipindahkan ke periode gaji lain, Pundi akan meminta konfirmasi karena ringkasan alokasi ikut berubah.
+        </p>
         <div className="flex flex-col gap-4 mt-3">
           <Field label="Nominal">
             <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} />
@@ -4747,7 +4978,7 @@ function EditTransactionModal({ tx, cat, categories = [], user, transactions = [
             </Field>
           )}
           <Field label="Tanggal">
-            <input className="transaction-date-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            <input className="transaction-date-input" type="date" value={date} max={todayStr()} onChange={(e) => { setDate(e.target.value); setError(""); }} />
           </Field>
           <Field label="Catatan">
             <input value={note} onChange={(e) => setNote(e.target.value)} onKeyDown={onEnter(submit)} />
@@ -5433,6 +5664,11 @@ export default function App() {
   };
 
   const handleAddTx = async (tx) => {
+    const dateError = newTransactionDateError(user, tx.date);
+    if (dateError) {
+      setAuthError(dateError);
+      return false;
+    }
     const transaction = {
       ...tx,
       created_at: tx.created_at || tx.createdAt || new Date().toISOString(),
@@ -5442,8 +5678,10 @@ export default function App() {
         supabase.from("transactions").upsert(transactionRow(user.id, transaction))
       );
       setTransactions((current) => [...current, transaction].sort((a, b) => a.date.localeCompare(b.date)));
+      return true;
     } catch {
       // enqueueTransactionSave reports the failure and reloads the persisted account.
+      return false;
     }
   };
   const handleUpdateTx = async (updatedTx) => {
@@ -5576,6 +5814,8 @@ export default function App() {
       if (!["expense", "topup", "withdraw"].includes(transactionType) || !positiveAmount(amount) || !validDate(date)) {
         throw new Error("Jenis transaksi, nominal, atau tanggal tidak valid.");
       }
+      const dateError = newTransactionDateError(user, date);
+      if (dateError) throw new Error(dateError);
       const category = categoryId ? user.categories.find((item) => item.id === categoryId) : null;
       if (categoryId && !category) throw new Error("Kategori yang diusulkan tidak tersedia di akunmu.");
       if (transactionType !== "topup" && !category) throw new Error("Pilih kategori untuk transaksi ini.");
@@ -5901,7 +6141,11 @@ export default function App() {
             transactions={transactions}
             initialTarget={showAddMoney === "salary" ? "salary" : "global"}
             onClose={() => setShowAddMoney(false)}
-            onSubmit={(tx) => { handleAddTx(tx); setShowAddMoney(false); }}
+            onSubmit={async (tx) => {
+              const saved = await handleAddTx(tx);
+              if (saved) setShowAddMoney(false);
+              return saved;
+            }}
             onSalarySubmit={handleConfirmMonthIncome}
           />
         </AddMoneyModalBoundary>
