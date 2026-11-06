@@ -779,7 +779,6 @@ function SpendingTrendChart({ user, transactions }) {
     ? `${Math.round(value / 1000000)}jt`
     : value >= 1000 ? `${Math.round(value / 1000)}k` : String(Math.round(value));
   const tooltipX = activePoint?.x > 270 ? activePoint.x - 172 : (activePoint?.x || 0) + 10;
-
   return (
     <div className="spending-trend-chart flex flex-col gap-2">
       <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -1082,6 +1081,215 @@ function DailySpendingChart({ monthTx, periodStart, periodEnd, subCategories = [
         })}
       </svg>
 
+      <div className="flex items-center justify-between text-xs muted">
+        <span>Hari ke-1</span>
+        <span>Setiap titik = total pengeluaran hari itu</span>
+        <span>{dayCount} hari</span>
+      </div>
+    </div>
+  );
+}
+
+function MonthlyHistorySpendingChart({ monthTx, periodStart, periodEnd, categories }) {
+  const [hoveredDay, setHoveredDay] = useState(null);
+  const [selectedCategoryId, setSelectedCategoryId] = useState("all");
+  const days = [];
+  for (let day = dateAtLocalMidnight(periodStart), end = dateAtLocalMidnight(periodEnd); day <= end; day.setDate(day.getDate() + 1)) {
+    days.push(dateString(day));
+  }
+  const dayCount = Math.max(days.length, 1);
+  const colors = ["#C9A24B", "#3E8E7E", "#C4604A", "#6E8FB0", "#9B7EBD", "#7FAE8B", "#B58AC4", "#D17A45", "#568A9F", "#A66B83", "#8C9440", "#7663A6"];
+  const spendingTx = monthTx.filter(isExpenseTx);
+  const hasUnallocatedSpending = spendingTx.some((transaction) => !transaction.categoryId);
+  const subOptions = categories.flatMap((category) => (category.subs || []).map((sub) => ({
+    value: `__sub:${category.id}:${sub.id}`,
+    category,
+    sub,
+  })));
+  const noSubOptions = categories
+    .filter((category) => spendingTx.some((transaction) => transaction.categoryId === category.id && !transaction.subId))
+    .map((category) => ({ value: `__no_sub:${category.id}`, category }));
+  const selectedSubOption = subOptions.find((option) => option.value === selectedCategoryId);
+  const selectedNoSubOption = noSubOptions.find((option) => option.value === selectedCategoryId);
+  const selectedCategoryExists = selectedCategoryId === "__unallocated"
+    ? hasUnallocatedSpending
+    : categories.some((category) => category.id === selectedCategoryId) ||
+      !!selectedSubOption || !!selectedNoSubOption;
+  const activeCategoryId = selectedCategoryId === "all" || selectedCategoryExists ? selectedCategoryId : "all";
+  const activeSubOption = subOptions.find((option) => option.value === activeCategoryId);
+  const activeNoSubOption = noSubOptions.find((option) => option.value === activeCategoryId);
+  const visibleCategories = activeCategoryId === "all"
+    ? categories
+    : categories.filter((category) =>
+      category.id === activeCategoryId ||
+      category.id === activeSubOption?.category.id ||
+      category.id === activeNoSubOption?.category.id
+    );
+  const series = visibleCategories.map((category, index) => {
+    const categoryTx = spendingTx.filter((transaction) =>
+      transaction.categoryId === category.id &&
+      (!activeSubOption || transaction.subId === activeSubOption.sub.id) &&
+      (!activeNoSubOption || !transaction.subId)
+    );
+    return {
+      id: activeSubOption ? activeSubOption.value : activeNoSubOption ? activeNoSubOption.value : category.id,
+      name: activeSubOption
+        ? `${category.name} · ${activeSubOption.sub.name}`
+        : activeNoSubOption
+          ? `${category.name} · Tanpa sub-alokasi`
+          : category.name,
+      color: colors[index % colors.length],
+      values: days.map((dateStr) => categoryTx
+        .filter((transaction) => transaction.date === dateStr)
+        .reduce((sum, transaction) => sum + Number(transaction.amount), 0)),
+    };
+  });
+  if ((activeCategoryId === "all" || activeCategoryId === "__unallocated") && hasUnallocatedSpending) {
+    const unallocatedTx = spendingTx.filter((transaction) => !transaction.categoryId);
+    series.push({
+      id: "__unallocated",
+      name: "Tanpa alokasi",
+      color: colors[series.length % colors.length],
+      values: days.map((dateStr) => unallocatedTx
+        .filter((transaction) => transaction.date === dateStr)
+        .reduce((sum, transaction) => sum + Number(transaction.amount), 0)),
+    });
+  }
+  const dailyTotals = Array.from({ length: dayCount }, (_, index) =>
+    series.reduce((sum, item) => sum + item.values[index], 0)
+  );
+  const totalSpending = dailyTotals.reduce((sum, value) => sum + value, 0);
+  const avgDaily = totalSpending / dayCount;
+  const maxDaily = Math.max(...series.flatMap((item) => item.values), 1);
+  const chartHeight = 120;
+  const chartLeft = 52;
+  const chartRight = 408;
+  const chartWidth = chartRight - chartLeft;
+  const pointsFor = (item) => item.values.map((value, index) => ({
+    x: chartLeft + (index / Math.max(dayCount - 1, 1)) * chartWidth,
+    y: chartHeight - (value / maxDaily) * chartHeight,
+  }));
+  const hoveredDate = hoveredDay ? days[hoveredDay - 1] : "";
+  const hoveredValues = series.map((item) => ({ ...item, value: item.values[(hoveredDay || 1) - 1] || 0 }));
+  const hoveredTooltipX = hoveredDay > dayCount * 0.7 ? 198 : 62;
+  const hoveredTooltipDetails = hoveredValues.filter((item) => item.value > 0);
+  const labelStep = dayCount <= 10 ? 1 : Math.ceil(dayCount / 7);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex justify-between items-center flex-wrap gap-3">
+        <p className="muted text-xs uppercase tracking-wide">Grafik Pengeluaran Harian</p>
+        <div className="flex items-center gap-3 flex-wrap">
+          <label className="muted text-xs flex items-center gap-2">
+            Tampilan
+            <select
+              value={activeCategoryId}
+              onChange={(event) => { setSelectedCategoryId(event.target.value); setHoveredDay(null); }}
+              aria-label="Pilih tampilan grafik pengeluaran riwayat"
+              style={{ maxWidth: 190 }}
+            >
+              <option value="all">Semua alokasi</option>
+              {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+              {subOptions.map(({ value, category, sub }) => (
+                <option key={value} value={value}>↳ {category.name} · {sub.name}</option>
+              ))}
+              {noSubOptions.map(({ value, category }) => (
+                <option key={value} value={value}>↳ {category.name} · Tanpa sub-alokasi</option>
+              ))}
+              {hasUnallocatedSpending && <option value="__unallocated">Tanpa alokasi</option>}
+            </select>
+          </label>
+          <div className="flex gap-4 text-xs">
+            <div>
+              <p className="muted">Rata-rata harian</p>
+              <p className="font-bold tabular">{rupiah(avgDaily)}</p>
+            </div>
+            <div><p className="muted">Total periode</p><p className="font-bold tabular" style={{ color: "var(--rose)" }}>{rupiah(totalSpending)}</p></div>
+          </div>
+        </div>
+      </div>
+      <div className="chart-legend flex flex-wrap gap-x-4 gap-y-1 text-xs muted">
+        {series.map((item) => <span key={item.id} className="flex items-center gap-1.5"><i style={{ width: 9, height: 9, borderRadius: "50%", background: item.color }} />{item.name}</span>)}
+      </div>
+      <svg width="100%" height={chartHeight + 40} viewBox={`0 0 440 ${chartHeight + 40}`} preserveAspectRatio="xMidYMid meet" style={{ overflow: "visible" }}>
+        {[0, 0.25, 0.5, 0.75, 1].map((ratio, index) => (
+          <line
+            key={`grid-${index}`}
+            x1={chartLeft}
+            y1={chartHeight - chartHeight * ratio}
+            x2={chartRight}
+            y2={chartHeight - chartHeight * ratio}
+            stroke="var(--border)"
+            strokeWidth="0.5"
+            opacity="0.3"
+          />
+        ))}
+        {series.map((item) => {
+          const points = pointsFor(item);
+          const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+          return <path key={item.id} d={path} fill="none" stroke={item.color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />;
+        })}
+        {days.map((date, index) => {
+          const cellWidth = chartWidth / dayCount;
+          return (
+            <rect
+              key={`hover-${date}`}
+              x={chartLeft + index * cellWidth}
+              y="0"
+              width={cellWidth}
+              height={chartHeight}
+              fill="transparent"
+              style={{ cursor: "crosshair" }}
+              onMouseEnter={() => setHoveredDay(index + 1)}
+              onMouseLeave={() => setHoveredDay(null)}
+              onFocus={() => setHoveredDay(index + 1)}
+              onBlur={() => setHoveredDay(null)}
+              onKeyDown={(event) => { if (event.key === "Escape") setHoveredDay(null); }}
+              tabIndex={0}
+              role="button"
+              aria-label={`Pengeluaran ${dateLabel(date)}: ${rupiah(dailyTotals[index])}`}
+            >
+              <title>{`${dateLabel(date)}: ${rupiah(dailyTotals[index])}`}</title>
+            </rect>
+          );
+        })}
+        {hoveredDay && (
+          <g pointerEvents="none">
+            <rect x={hoveredTooltipX} y="6" width="222" height={42 + hoveredTooltipDetails.length * 14} rx="6" fill="var(--surface)" stroke="var(--gold)" strokeWidth="1" />
+            <text x={hoveredTooltipX + 10} y="20" fontSize="10" fill="var(--muted)">
+              {dateLabel(hoveredDate)} · {rupiah(dailyTotals[hoveredDay - 1])}
+            </text>
+            {hoveredTooltipDetails.map((item, index) => (
+              <text key={`${item.id}-detail`} x={hoveredTooltipX + 10} y={34 + index * 14} fontSize="9" fill={item.color}>
+                {`${item.name}: ${rupiah(item.value)}`}
+              </text>
+            ))}
+          </g>
+        )}
+        {Array.from({ length: dayCount }, (_, index) => index + 1)
+          .filter((day) => day % labelStep === 0 || day === 1 || day === dayCount)
+          .map((day) => (
+            <text
+              key={`label-${day}`}
+              x={chartLeft + (day - 1) / Math.max(dayCount - 1, 1) * chartWidth}
+              y={chartHeight + 20}
+              textAnchor="middle"
+              fontSize="11"
+              fill="var(--muted)"
+            >
+              {Number(days[day - 1]?.slice(-2) || day)}
+            </text>
+          ))}
+        {[0, 0.5, 1].map((ratio, index) => {
+          const value = Math.round(maxDaily * ratio);
+          const shortValue = value >= 1000000 ? `${Math.round(value / 1000000)}jt` : value >= 1000 ? `${Math.round(value / 1000)}k` : String(value);
+          return (
+            <text key={`y-label-${index}`} x="45" y={chartHeight - chartHeight * ratio + 3} textAnchor="end" fontSize="10" fill="var(--muted)">
+              {shortValue}
+            </text>
+          );
+        })}
+      </svg>
       <div className="flex items-center justify-between text-xs muted">
         <span>Hari ke-1</span>
         <span>Setiap titik = total pengeluaran hari itu</span>
@@ -2151,7 +2359,7 @@ function AppFooter() {
       >
         @naufalnurf__
       </a>
-      <span className="muted"> · v1.4.0</span>
+      <span className="muted"> · v1.4.1</span>
     </footer>
   );
 }
@@ -2399,6 +2607,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const [assetMode, setAssetMode] = useState("setor"); // setor | tarik
   const [search, setSearch] = useState("");
   const [editingTx, setEditingTx] = useState(null);
+  const [deletingTx, setDeletingTx] = useState(null);
   const [recName, setRecName] = useState("");
   const [recAmount, setRecAmount] = useState("");
   const [recSubId, setRecSubId] = useState("");
@@ -2940,7 +3149,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
                     {!t.allocationRepayment && (
                       <>
                         <button className="icon-btn" onClick={() => setEditingTx(t)}><Pencil size={14} className="muted" /></button>
-                        <button className="icon-btn" onClick={() => { if (window.confirm("Hapus transaksi ini?")) onDeleteTx(t.id); }}><X size={15} className="muted" /></button>
+                        <button className="icon-btn" aria-label="Hapus transaksi" onClick={() => setDeletingTx(t)}><Trash2 size={14} className="muted" /></button>
                       </>
                     )}
                   </div>
@@ -2969,7 +3178,18 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
           transactions={transactions}
           period={activePeriod}
           onClose={() => setEditingTx(null)}
-          onSave={(updated) => { onUpdateTx(updated); setEditingTx(null); }}
+          onSave={async (updated) => {
+            const saved = await onUpdateTx(updated);
+            if (saved) setEditingTx(null);
+            return saved;
+          }}
+        />
+      )}
+      {deletingTx && (
+        <DeleteTransactionModal
+          transaction={deletingTx}
+          onClose={() => setDeletingTx(null)}
+          onConfirm={onDeleteTx}
         />
       )}
       {borrowPromptStage && (
@@ -3525,6 +3745,8 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
   const [expandedCat, setExpandedCat] = useState(null);
   const [search, setSearch] = useState("");
   const [editingTx, setEditingTx] = useState(null);
+  const [deletingTx, setDeletingTx] = useState(null);
+  const [showTransactionHistory, setShowTransactionHistory] = useState(false);
 
   const monthT = transactionsForPeriod(transactions, selectedPeriod, periods, user);
   const expenses = monthT.filter(isExpenseTx);
@@ -3546,6 +3768,10 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
   const selectedEnd = getPeriodEnd(selectedPeriod, periods) || todayStr();
   const balance = cumulativeBalanceUpTo(user, transactions, selectedEnd);
   const prevCarry = balance - thisMonthNet;
+  const totalAssetBalance = getAssetCategoryCatalog(user).reduce(
+    (sum, category) => sum + assetBalance(transactions, category.id, undefined, user),
+    0
+  );
 
   const directTopupForCat = (catId) => topups.filter((t) => t.categoryId === catId && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const topupForSub = (catId, subId) => topups.filter((t) => t.categoryId === catId && t.subId === subId).reduce((s, t) => s + Number(t.amount), 0);
@@ -3578,9 +3804,111 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
   const trendData = trendPeriods.map((period) => ({
     id: period.id,
     period,
-    spent: transactionsForPeriod(transactions, period, periods, user).filter(isExpenseTx).reduce((s, t) => s + Number(t.amount), 0),
+    spent: transactionsForPeriod(transactions, period, periods, user)
+      .filter(isExpenseTx)
+      .reduce((sum, transaction) => sum + Number(transaction.amount), 0),
   }));
-  const trendMax = Math.max(1, ...trendData.map((d) => d.spent));
+  const trendMax = Math.max(1, ...trendData.map((item) => item.spent));
+  const renderTransactionRows = (items) => items.map((t) => {
+    const cat = historyCategories.find((c) => c.id === t.categoryId) || user.categories.find((c) => c.id === t.categoryId);
+    const sub = cat?.subs.find((s) => s.id === t.subId);
+    const topup = isTopupTx(t);
+    const assetTopup = isAssetTopupTx(t);
+    const assetOpening = isAssetOpeningTx(t);
+    const repaymentOut = t.type === "allocation_transfer_out";
+    const repaymentIn = t.type === "allocation_transfer_in";
+    const positive = topup || assetTopup || assetOpening || repaymentIn;
+    return (
+      <div key={t.id} className="card2 p-3 flex items-center justify-between">
+        <div>
+          <p className="text-sm" style={repaymentOut || repaymentIn ? { color: "var(--gold)" } : undefined}>
+            {t.note || sub?.name || cat?.name || (repaymentOut ? "Pengembalian pinjaman" : repaymentIn ? "Dana tambahan dari alokasi" : assetOpening ? "Saldo awal aset" : assetTopup ? "Penambahan saldo aset" : topup ? "Tambahan dana" : "Pengeluaran")}
+          </p>
+          <p className="muted text-xs">
+            {t.date}
+            {cat ? ` · ${cat.name}` : ""}
+            {sub ? ` · ${sub.name}` : ""}
+            {t.borrowedFromCategoryId
+              ? ` · ${t.borrowedFromCategoryId === t.categoryId ? "Dialihkan" : "Pinjam"} ${rupiah(transactionBorrowedAmount(t))} dari ${allocationSourceName(user, t.borrowedFromCategoryId, t.borrowedFromSubId)}`
+              : ""}
+            {!cat && topup ? " · Seluruh alokasi" : assetOpening ? " · Saldo awal aset" : assetTopup ? " · Penambahan aset" : ""}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="transaction-amount tabular" style={{ color: positive ? "var(--teal)" : "var(--rose)" }}>{positive ? "+" : "-"}{rupiah(t.amount)}</span>
+          {!t.allocationRepayment && (
+            <>
+              <button className="icon-btn" aria-label="Edit transaksi" onClick={() => setEditingTx(t)}><Pencil size={14} className="muted" /></button>
+              <button className="icon-btn" aria-label="Hapus transaksi" onClick={() => setDeletingTx(t)}><Trash2 size={14} className="muted" /></button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  });
+  const transactionModals = (
+    <>
+      {editingTx && (
+        <EditTransactionModal
+          tx={editingTx}
+          cat={historyCategories.find((c) => c.id === editingTx.categoryId) || user.categories.find((c) => c.id === editingTx.categoryId) || null}
+          categories={user.categories}
+          user={user}
+          transactions={transactions}
+          period={selectedPeriod}
+          onClose={() => setEditingTx(null)}
+          onSave={async (updated) => {
+            const saved = await onUpdateTx(updated);
+            if (saved) setEditingTx(null);
+            return saved;
+          }}
+        />
+      )}
+      {deletingTx && (
+        <DeleteTransactionModal
+          transaction={deletingTx}
+          onClose={() => setDeletingTx(null)}
+          onConfirm={onDeleteTx}
+        />
+      )}
+    </>
+  );
+
+  if (showTransactionHistory) {
+    return (
+      <div className="min-h-screen">
+        <TopBar
+          name={user.name}
+          onLogout={onLogout}
+          right={
+            <button className="btn-ghost text-sm flex items-center gap-2" onClick={() => setShowTransactionHistory(false)}>
+              <ArrowLeft size={14} /> Riwayat Periode
+            </button>
+          }
+        />
+        <div className="p-4 md:p-8 max-w-3xl mx-auto flex flex-col gap-6 anim-fade-up">
+          <div>
+            <h1 className="display" style={{ fontSize: 22, fontWeight: 700 }}>Riwayat Transaksi Bulanan</h1>
+            <p className="muted text-sm mt-1">Periode {dateLabel(selectedPeriod.startDate)} - {dateLabel(selectedEnd)}</p>
+          </div>
+          <div className="card p-6">
+            <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+              <p className="muted text-xs uppercase tracking-wide">Semua transaksi ({filteredTx.length})</p>
+              <div className="flex items-center gap-1.5" style={{ maxWidth: 260 }}>
+                <Search size={14} className="muted" />
+                <input style={{ fontSize: 12 }} placeholder="Cari catatan / kategori" value={search} onChange={(event) => setSearch(event.target.value)} />
+              </div>
+            </div>
+            <div className="flex flex-col gap-2">
+              {filteredTx.length === 0 && <p className="muted text-sm">Tidak ada transaksi yang cocok.</p>}
+              {renderTransactionRows(filteredTx)}
+            </div>
+          </div>
+        </div>
+        {transactionModals}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen">
@@ -3602,24 +3930,24 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
               <p className="muted text-xs uppercase tracking-wide">Tren Pengeluaran ({trendData.length} Periode Terakhir)</p>
             </div>
             <div className="flex items-end gap-3" style={{ height: 120 }}>
-              {trendData.map((d) => (
-                <div key={d.id} className="flex-1 flex flex-col items-center justify-end gap-1" style={{ height: "100%" }}>
-                  <span className="tabular" style={{ fontSize: 10, color: "var(--muted)" }}>{Math.round(d.spent / 1000)}k</span>
+              {trendData.map((item) => (
+                <div key={item.id} className="flex-1 flex flex-col items-center justify-end gap-1" style={{ height: "100%" }}>
+                  <span className="tabular" style={{ fontSize: 10, color: "var(--muted)" }}>{Math.round(item.spent / 1000)}k</span>
                   <div
                     style={{
                       width: "100%",
                       maxWidth: 36,
-                      height: `${Math.max(4, (d.spent / trendMax) * 90)}px`,
+                      height: `${Math.max(4, (item.spent / trendMax) * 90)}px`,
                       borderRadius: "4px 4px 0 0",
-                      background: d.id === selectedPeriod.id ? "var(--gold)" : "var(--surface2)",
+                      background: item.id === selectedPeriod.id ? "var(--gold)" : "var(--surface2)",
                       border: "1px solid var(--border)",
                       cursor: "pointer",
                       transition: "height .3s ease",
                     }}
-                    onClick={() => { setSelectedId(d.id); setExpandedCat(null); }}
+                    onClick={() => { setSelectedId(item.id); setExpandedCat(null); }}
                   />
                   <span className="muted" style={{ fontSize: 10 }}>
-                    {dateAtLocalMidnight(d.period.startDate).toLocaleDateString("id-ID", { day: "numeric", month: "short" })}
+                    {dateAtLocalMidnight(item.period.startDate).toLocaleDateString("id-ID", { day: "numeric", month: "short" })}
                   </span>
                 </div>
               ))}
@@ -3628,7 +3956,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
         )}
 
         <div className="flex gap-2 flex-wrap">
-          {historyPeriods.slice().reverse().map((period) => (
+          {historyPeriods.map((period) => (
             <button
               key={period.id}
               className="btn-ghost text-sm"
@@ -3643,7 +3971,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
         <p className="muted text-xs">Periode {dateLabel(selectedPeriod.startDate)} - {dateLabel(selectedEnd)}</p>
 
         <div className="card p-6">
-            <div className="summary-metrics flex flex-wrap gap-8">
+            <div className="summary-metrics monthly-history-summary-metrics flex gap-8">
             <div>
               <p className="muted text-xs uppercase tracking-wide">Income efektif</p>
               <p className="tabular" style={{ fontWeight: 700 }}>{rupiah(cashIncome)}</p>
@@ -3661,7 +3989,20 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
               <p className="tabular" style={{ fontWeight: 700, color: "var(--teal)" }}>{rupiah(balance)}</p>
               {prevCarry !== 0 && <p className="text-xs mt-0.5 muted">termasuk {rupiah(prevCarry)} bawaan bulan sebelumnya</p>}
             </div>
+            <div>
+              <p className="muted text-xs uppercase tracking-wide">Total saldo aset</p>
+              <p className="tabular" style={{ fontWeight: 700, color: "var(--gold)" }}>{rupiah(totalAssetBalance)}</p>
+            </div>
           </div>
+        </div>
+
+        <div className="card p-6">
+          <MonthlyHistorySpendingChart
+            monthTx={monthT}
+            periodStart={selectedPeriod.startDate}
+            periodEnd={selectedEnd}
+            categories={historyCategories}
+          />
         </div>
 
         <div className="card p-6">
@@ -3682,17 +4023,17 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
               return (
                 <div key={c.id} className="card2 p-3">
                   <button
-                    className="flex items-center justify-between w-full"
+                    className="flex items-center justify-between w-full monthly-history-allocation-row"
                     style={{ background: "none", border: "none", color: "var(--text)", cursor: "pointer" }}
                     onClick={() => setExpandedCat(expanded ? null : c.id)}
                   >
-                    <span className="flex items-center gap-2 text-sm">
+                    <span className="flex items-center gap-2 text-sm monthly-history-allocation-name">
                       <span style={{ width: 10, height: 10, borderRadius: 9999, background: COLORS[i % COLORS.length] }} />
-                      {c.name}
+                      <span className="monthly-history-allocation-label">{c.name}</span>
                       {c.isAsset && <span style={{ color: "var(--gold)" }}>🏦</span>}
                       <ChevronRight size={14} className="muted" style={{ transform: expanded ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
                     </span>
-                    <span className="tabular text-xs muted">
+                    <span className="tabular text-xs muted monthly-history-allocation-value">
                       {c.isAsset ? <>saldo total {rupiah(assetBalance(transactions, c.id, undefined, user))}</> : <>{rupiah(spent)} / {rupiah(allocated)}</>}
                     </span>
                   </button>
@@ -3751,67 +4092,18 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
 
         <div>
           <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-            <p className="muted text-xs uppercase tracking-wide">Semua transaksi bulan ini</p>
-            <div className="flex items-center gap-1.5" style={{ maxWidth: 220 }}>
-              <Search size={14} className="muted" />
-              <input style={{ fontSize: 12 }} placeholder="Cari catatan / kategori" value={search} onChange={(e) => setSearch(e.target.value)} />
-            </div>
+            <p className="muted text-xs uppercase tracking-wide">5 transaksi terbaru</p>
+            <button type="button" className="btn-ghost text-sm flex items-center gap-2" onClick={() => setShowTransactionHistory(true)}>
+              Lihat riwayat transaksi <ArrowRight size={14} />
+            </button>
           </div>
           <div className="flex flex-col gap-2">
-            {filteredTx.length === 0 && <p className="muted text-sm">Tidak ada transaksi yang cocok.</p>}
-            {filteredTx.map((t) => {
-              const cat = historyCategories.find((c) => c.id === t.categoryId) || user.categories.find((c) => c.id === t.categoryId);
-              const sub = cat?.subs.find((s) => s.id === t.subId);
-              const topup = isTopupTx(t);
-              const assetTopup = isAssetTopupTx(t);
-              const assetOpening = isAssetOpeningTx(t);
-              const repaymentOut = t.type === "allocation_transfer_out";
-              const repaymentIn = t.type === "allocation_transfer_in";
-              const positive = topup || assetTopup || assetOpening || repaymentIn;
-              return (
-                <div key={t.id} className="card2 p-3 flex items-center justify-between">
-                  <div>
-                    <p className="text-sm" style={repaymentOut || repaymentIn ? { color: "var(--gold)" } : undefined}>
-                      {t.note || sub?.name || cat?.name || (repaymentOut ? "Pengembalian pinjaman" : repaymentIn ? "Dana tambahan dari alokasi" : assetOpening ? "Saldo awal aset" : assetTopup ? "Penambahan saldo aset" : topup ? "Tambahan dana" : "Pengeluaran")}
-                    </p>
-                    <p className="muted text-xs">
-                      {t.date}
-                      {cat ? ` · ${cat.name}` : ""}
-                      {sub ? ` · ${sub.name}` : ""}
-                      {t.borrowedFromCategoryId
-                        ? ` · ${t.borrowedFromCategoryId === t.categoryId ? "Dialihkan" : "Pinjam"} ${rupiah(transactionBorrowedAmount(t))} dari ${allocationSourceName(user, t.borrowedFromCategoryId, t.borrowedFromSubId)}`
-                        : ""}
-                      {!cat && topup ? " · Seluruh alokasi" : assetOpening ? " · Saldo awal aset" : assetTopup ? " · Penambahan aset" : ""}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="transaction-amount tabular" style={{ color: positive ? "var(--teal)" : "var(--rose)" }}>{positive ? "+" : "-"}{rupiah(t.amount)}</span>
-                    {!t.allocationRepayment && (
-                      <>
-                        <button className="icon-btn" onClick={() => setEditingTx(t)}><Pencil size={14} className="muted" /></button>
-                        <button className="icon-btn" onClick={() => { if (window.confirm("Hapus transaksi ini?")) onDeleteTx(t.id); }}><X size={15} className="muted" /></button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+            {monthTxSorted.length === 0 && <p className="muted text-sm">Belum ada transaksi pada periode ini.</p>}
+            {renderTransactionRows(monthTxSorted.slice(0, 5))}
           </div>
         </div>
       </div>
-
-      {editingTx && (
-        <EditTransactionModal
-          tx={editingTx}
-          cat={historyCategories.find((c) => c.id === editingTx.categoryId) || user.categories.find((c) => c.id === editingTx.categoryId) || null}
-          categories={user.categories}
-          user={user}
-          transactions={transactions}
-          period={selectedPeriod}
-          onClose={() => setEditingTx(null)}
-          onSave={(updated) => { onUpdateTx(updated); setEditingTx(null); }}
-        />
-      )}
+      {transactionModals}
     </div>
   );
 }
@@ -5009,6 +5301,49 @@ function EditTransactionModal({ tx, cat, categories = [], user, transactions = [
   );
 }
 
+function DeleteTransactionModal({ transaction, onClose, onConfirm }) {
+  const [busy, setBusy] = useState(false);
+  const confirmDelete = async () => {
+    setBusy(true);
+    const deleted = await onConfirm(transaction.id);
+    setBusy(false);
+    if (deleted) onClose();
+  };
+
+  return (
+    <div className="modal-overlay anim-fade" onClick={busy ? undefined : onClose}>
+      <div
+        className="card p-6 anim-pop"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-transaction-title"
+        style={{ maxWidth: 400, width: "100%" }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-2">
+          <h2 id="delete-transaction-title" className="display" style={{ fontSize: 18, fontWeight: 700 }}>Hapus data?</h2>
+          <button type="button" className="icon-btn" aria-label="Tutup konfirmasi hapus" onClick={onClose} disabled={busy}><X size={18} /></button>
+        </div>
+        <p className="muted text-sm">
+          Data transaksi{transaction.note ? ` “${transaction.note}”` : ""} akan dihapus permanen. Tindakan ini tidak dapat dibatalkan.
+        </p>
+        <div className="flex justify-end gap-2 mt-5">
+          <button type="button" className="btn-ghost text-sm" onClick={onClose} disabled={busy}>Batal</button>
+          <button
+            type="button"
+            className="btn-primary flex items-center justify-center gap-2 text-sm"
+            style={{ background: "var(--rose)", color: "var(--text)" }}
+            onClick={confirmDelete}
+            disabled={busy}
+          >
+            <Trash2 size={15} /> {busy ? "Menghapus..." : "Ya, hapus"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Financial calculator page ---------- */
 function num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 
@@ -5268,6 +5603,7 @@ export default function App() {
   const [transactions, setTransactions] = useState([]);
   const [authError, setAuthError] = useState("");
   const [authNotice, setAuthNotice] = useState("");
+  const [transactionNotice, setTransactionNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState("dashboard"); // dashboard | category | editAlloc | monthlyHistory | settings | goals
   const [activeCategoryId, setActiveCategoryId] = useState(null);
@@ -5288,6 +5624,12 @@ export default function App() {
   const signupConfirmationRef = useRef(false);
   const signupConfirmationHandledRef = useRef(false);
   const passwordRecoveryRef = useRef(false);
+
+  useEffect(() => {
+    if (!transactionNotice) return undefined;
+    const timeoutId = window.setTimeout(() => setTransactionNotice(""), 3200);
+    return () => window.clearTimeout(timeoutId);
+  }, [transactionNotice]);
 
   useEffect(() => {
     const authFlow = new URLSearchParams(window.location.search).get("auth");
@@ -5696,6 +6038,7 @@ export default function App() {
         supabase.from("transactions").upsert(transactionRow(user.id, transaction))
       );
       setTransactions((current) => [...current, transaction].sort((a, b) => a.date.localeCompare(b.date)));
+      setTransactionNotice("Data berhasil ditambahkan.");
       return true;
     } catch {
       // enqueueTransactionSave reports the failure and reloads the persisted account.
@@ -5717,8 +6060,11 @@ export default function App() {
       setTransactions((current) => current
         .map((item) => item.id === transaction.id ? transaction : item)
         .sort((a, b) => a.date.localeCompare(b.date)));
+      setTransactionNotice("Data berhasil diperbarui.");
+      return true;
     } catch {
       // enqueueTransactionSave reports the failure and reloads the persisted account.
+      return false;
     }
   };
   const handleDeleteTx = async (id) => {
@@ -5727,8 +6073,11 @@ export default function App() {
         supabase.from("transactions").delete().eq("id", id).eq("user_id", user.id)
       );
       setTransactions((current) => current.filter((transaction) => transaction.id !== id));
+      setTransactionNotice("Data berhasil dihapus.");
+      return true;
     } catch {
       // enqueueTransactionSave reports the failure and reloads the persisted account.
+      return false;
     }
   };
   const handleAddRecurring = (item) => updateUser({ recurring: [...(user.recurring || []), item] });
@@ -6144,6 +6493,27 @@ export default function App() {
           <button className="icon-btn" aria-label="Tutup pesan error" onClick={() => setAuthError("")}><X size={15} /></button>
         </div>
       )}
+      {transactionNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="card p-3 flex items-center justify-between gap-3"
+          style={{
+            position: "fixed",
+            top: "max(12px, env(safe-area-inset-top))",
+            left: "50%",
+            transform: "translateX(-50%)",
+            width: "min(420px, calc(100vw - 24px))",
+            zIndex: 2001,
+            borderColor: "var(--teal)",
+            color: "var(--teal)",
+            boxShadow: "0 12px 36px rgba(0,0,0,.35)",
+          }}
+        >
+          <span className="text-sm flex items-center gap-2"><Check size={15} />{transactionNotice}</span>
+          <button type="button" className="icon-btn" aria-label="Tutup notifikasi" onClick={() => setTransactionNotice("")}><X size={15} /></button>
+        </div>
+      )}
       {content}
       {SHOW_PUNDI_ASSISTANT && user && accountLoaded && !pendingUser && (
         <AssistantChat
@@ -6372,6 +6742,31 @@ const STYLE = `
   .mmp-app .dashboard-analytics-card{ padding:16px; }
   .mmp-app .allocation-ring-chart{ width:160px; }
   .mmp-app .spending-trend-svg{ max-height:180px; }
+  .mmp-app .monthly-history-summary-metrics{
+    display:flex;
+    flex-wrap:nowrap;
+    overflow-x:auto;
+    scrollbar-width:thin;
+  }
+  .mmp-app .monthly-history-summary-metrics > *{
+    flex:1 0 140px;
+    min-width:140px;
+  }
+  .mmp-app .monthly-history-summary-metrics .tabular{ white-space:nowrap; }
+  .mmp-app .monthly-history-allocation-row{ gap:8px; min-width:0; }
+  .mmp-app .monthly-history-allocation-name{ flex:1 1 auto; min-width:0; }
+  .mmp-app .monthly-history-allocation-label{
+    min-width:0;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  .mmp-app .monthly-history-allocation-value{
+    flex:0 0 auto;
+    white-space:nowrap;
+    overflow-wrap:normal;
+    font-size:11px;
+  }
 
   .mmp-app .p-4.md\\:p-8{ padding:16px; }
   .mmp-app .p-4.md\\:p-6{ padding:16px; }
