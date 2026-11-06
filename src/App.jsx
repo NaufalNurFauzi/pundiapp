@@ -842,23 +842,40 @@ function SpendingTrendChart({ user, transactions }) {
 /* Daily Spending Chart for CategoryDetail */
 function DailySpendingChart({ monthTx, periodStart, periodEnd, subCategories = [] }) {
   const [hoveredDay, setHoveredDay] = useState(null);
+  const [selectedSubId, setSelectedSubId] = useState("all");
   const days = [];
   for (let day = dateAtLocalMidnight(periodStart), end = dateAtLocalMidnight(periodEnd); day <= end; day.setDate(day.getDate() + 1)) {
     days.push(dateString(day));
   }
   const dayCount = Math.max(days.length, 1);
 
-  const colors = ["#C9A24B", "#3E8E7E", "#C4604A", "#6E8FB0", "#9B7EBD", "#7FAE8B", "#B58AC4"];
+  const colors = ["#C9A24B", "#3E8E7E", "#C4604A", "#6E8FB0", "#9B7EBD", "#7FAE8B", "#B58AC4", "#D17A45", "#568A9F", "#A66B83", "#8C9440", "#7663A6"];
   const spendingTx = monthTx.filter((t) => t.type === "expense" || !t.type);
-  const subIds = Array.from(new Set(spendingTx.map((t) => t.subId || "__category")));
-  const series = subIds.map((subId, index) => {
-    const subName = subId === "__category" ? "Tanpa sub-alokasi" : (subCategories.find((sub) => sub.id === subId)?.name || subId);
-    const values = days.map((dateStr) => {
-      return spendingTx
-        .filter((t) => (t.subId || "__category") === subId && t.date === dateStr)
-        .reduce((sum, t) => sum + Number(t.amount), 0);
-    });
-    return { id: subId, name: subName, color: colors[index % colors.length], values };
+  const hasUnallocatedSpending = spendingTx.some((transaction) => !transaction.subId);
+  const selectedSubExists = selectedSubId === "__category"
+    ? hasUnallocatedSpending
+    : subCategories.some((sub) => sub.id === selectedSubId);
+  const activeSubId = selectedSubId === "all" || selectedSubExists ? selectedSubId : "all";
+  const allSubIds = Array.from(new Set([
+    ...subCategories.map((sub) => sub.id),
+    ...spendingTx.map((transaction) => transaction.subId || "__category"),
+  ]));
+  const visibleSubIds = activeSubId === "all"
+    ? allSubIds
+    : [activeSubId];
+  const series = visibleSubIds.map((subId, index) => {
+    const sub = subCategories.find((item) => item.id === subId);
+    const transactionsForSub = spendingTx.filter((transaction) =>
+      (transaction.subId || "__category") === subId
+    );
+    return {
+      id: subId,
+      name: subId === "__category" ? "Tanpa sub-alokasi" : sub?.name || subId,
+      color: colors[index % colors.length],
+      values: days.map((dateStr) => transactionsForSub
+        .filter((transaction) => transaction.date === dateStr)
+        .reduce((sum, transaction) => sum + Number(transaction.amount), 0)),
+    };
   });
   const dailyTotals = Array.from({ length: dayCount }, (_, index) => series.reduce((sum, item) => sum + item.values[index], 0));
   const totalSpending = dailyTotals.reduce((sum, value) => sum + value, 0);
@@ -876,20 +893,37 @@ function DailySpendingChart({ monthTx, periodStart, periodEnd, subCategories = [
   }));
   const hoveredDate = hoveredDay ? days[hoveredDay - 1] : "";
   const hoveredValues = series.map((item) => ({ ...item, value: item.values[(hoveredDay || 1) - 1] || 0 }));
+  const hoveredTooltipX = hoveredDay > dayCount * 0.7 ? 198 : 62;
+  const hoveredTooltipDetails = hoveredValues.filter((item) => item.value > 0);
   const labelStep = dayCount <= 10 ? 1 : Math.ceil(dayCount / 7);
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex justify-between items-center">
+      <div className="flex justify-between items-center flex-wrap gap-3">
         <div>
           <p className="muted text-xs uppercase tracking-wide">Grafik Pengeluaran Harian</p>
         </div>
-        <div className="flex gap-4 text-xs">
+        <div className="flex items-center gap-3 flex-wrap">
+          <label className="muted text-xs flex items-center gap-2">
+            Tampilan
+            <select
+              value={activeSubId}
+              onChange={(event) => { setSelectedSubId(event.target.value); setHoveredDay(null); }}
+              aria-label="Pilih tampilan grafik pengeluaran"
+              style={{ maxWidth: 170 }}
+            >
+              <option value="all">Semua alokasi</option>
+              {subCategories.map((sub) => <option key={sub.id} value={sub.id}>{sub.name}</option>)}
+              {hasUnallocatedSpending && <option value="__category">Tanpa sub-alokasi</option>}
+            </select>
+          </label>
+          <div className="flex gap-4 text-xs">
           <div>
             <p className="muted">Rata-rata harian</p>
             <p className="font-bold tabular">{rupiah(avgDaily)}</p>
           </div>
           <div><p className="muted">Total periode</p><p className="font-bold tabular" style={{ color: "var(--rose)" }}>{rupiah(totalSpending)}</p></div>
+          </div>
         </div>
       </div>
 
@@ -944,27 +978,27 @@ function DailySpendingChart({ monthTx, periodStart, periodEnd, subCategories = [
         {hoveredDay && (
           <g pointerEvents="none">
             <rect
-              x={hoveredDay > dayCount * 0.7 ? 250 : 62}
+              x={hoveredTooltipX}
               y="6"
-              width="170"
-              height={42 + Math.min(4, hoveredValues.filter((item) => item.value > 0).length) * 14}
+              width="222"
+              height={42 + hoveredTooltipDetails.length * 14}
               rx="6"
               fill="var(--surface)"
               stroke="var(--gold)"
               strokeWidth="1"
             />
             <text
-              x={hoveredDay > dayCount * 0.7 ? 260 : 72}
+              x={hoveredTooltipX + 10}
               y="20"
               fontSize="10"
               fill="var(--muted)"
             >
               {dateLabel(hoveredDate)} · {rupiah(dailyTotals[hoveredDay - 1])}
             </text>
-            {hoveredValues.filter((item) => item.value > 0).slice(0, 4).map((item, index) => (
+            {hoveredTooltipDetails.map((item, index) => (
               <text
                 key={`${item.id}-detail`}
-                x={hoveredDay > dayCount * 0.7 ? 260 : 72}
+                x={hoveredTooltipX + 10}
                 y={34 + index * 14}
                 fontSize="9"
                 fill={item.color}
@@ -1074,18 +1108,6 @@ function NewValueInput({ value, onValue, mode, onMode, style }) {
     </div>
   );
 }
-/* Nudges one row's percent so the group sums to exactly 100%, absorbing
-   the tiny leftover that nominal-based (Rupiah) entry tends to create. */
-function autoBalance(list) {
-  if (!list.length) return list;
-  const total = list.reduce((s, x) => s + Number(x.percent || 0), 0);
-  const diff = round1(100 - total);
-  if (diff === 0) return list;
-  let biggestIdx = 0;
-  list.forEach((x, i) => { if (Number(x.percent) > Number(list[biggestIdx].percent)) biggestIdx = i; });
-  return list.map((x, i) => i === biggestIdx ? { ...x, percent: round1(Number(x.percent) + diff) } : x);
-}
-
 function AllocationRing({ categories, centerLabel, centerValue }) {
   let cumulative = 0;
   const stops = categories.length
@@ -1599,17 +1621,8 @@ function CustomBuilder({ initialCategories, income, onDone, onBack }) {
           <ProgressBar percent={total} color={isHundred(total) ? "var(--teal)" : "var(--gold)"} />
           <div className="flex items-center justify-between mt-1 text-xs muted">
             <span>Total: {fmtPercent(total)}%</span>
-            <span>Sisa: {fmtPercent(remaining)}%</span>
+            <span>Sisa: {fmtPercent(remaining)}% · {rupiah(income * remaining / 100)}</span>
           </div>
-          {!isHundred(total) && categories.length > 0 && (
-            <button
-              type="button"
-              className="btn-ghost text-xs mt-2"
-              onClick={() => setCategories(autoBalance(categories))}
-            >
-              Pas-kan otomatis ke 100% (sisa dibulatkan ke kategori terbesar)
-            </button>
-          )}
           {error && <p className="text-sm mt-2" style={{ color: "var(--rose)" }}>{error}</p>}
 
           <div className="flex gap-2 mt-6">
@@ -1682,17 +1695,8 @@ function CustomBuilder({ initialCategories, income, onDone, onBack }) {
             <ProgressBar percent={subTotal} color={isHundred(subTotal) ? "var(--teal)" : "var(--gold)"} />
             <div className="flex items-center justify-between mt-1 text-xs muted">
               <span>Total sub: {fmtPercent(subTotal)}%</span>
-              <span>Sisa: {fmtPercent(subRemaining)}%</span>
+              <span>Sisa: {fmtPercent(subRemaining)}% · {rupiah(activeCatAmount * subRemaining / 100)}</span>
             </div>
-            {!isHundred(subTotal) && activeCat.subs.length > 0 && (
-              <button
-                type="button"
-                className="btn-ghost text-xs mt-2"
-                onClick={() => setCategories(categories.map((c) => c.id === activeCat.id ? { ...c, subs: autoBalance(c.subs) } : c))}
-              >
-                Pas-kan otomatis ke 100% (sisa dibulatkan ke sub terbesar)
-              </button>
-            )}
           </>
         )}
 
@@ -1772,6 +1776,7 @@ function AllocationEditor({ user, onSave, onCancel, onLogout, initialCategories,
 
   const income = Number(incomeOverride ?? getActivePeriod(user).amount ?? 0);
   const total = categories.reduce((s, c) => s + Number(c.percent || 0), 0);
+  const remaining = 100 - total;
 
   const updateCatName = (id, name) => setCategories(categories.map((c) => c.id === id ? { ...c, name } : c));
   const updateCatPercent = (id, percent) => setCategories(categories.map((c) => c.id === id ? { ...c, percent } : c));
@@ -1830,19 +1835,10 @@ function AllocationEditor({ user, onSave, onCancel, onLogout, initialCategories,
           <div className="flex items-center justify-between mb-3">
             <p className="muted text-xs uppercase tracking-wide">Kategori utama</p>
             <span className="text-xs tabular" style={{ color: isHundred(total) ? "var(--teal)" : "var(--rose)" }}>
-              Total {fmtPercent(total)}%
+              Total {fmtPercent(total)}% · Sisa {fmtPercent(remaining)}% ({rupiah(income * remaining / 100)})
             </span>
           </div>
           <ProgressBar percent={total} color={isHundred(total) ? "var(--teal)" : "var(--gold)"} />
-          {!isHundred(total) && categories.length > 0 && (
-            <button
-              type="button"
-              className="btn-ghost text-xs mt-2"
-              onClick={() => setCategories(autoBalance(categories))}
-            >
-              Pas-kan otomatis ke 100% (sisa dibulatkan ke kategori terbesar)
-            </button>
-          )}
 
           <div className="flex flex-col gap-2 mt-4">
             {categories.map((c, i) => {
@@ -1885,7 +1881,7 @@ function AllocationEditor({ user, onSave, onCancel, onLogout, initialCategories,
                       <div className="flex items-center justify-between">
                         <p className="muted text-xs">Sub-alokasi dari {c.name} (opsional)</p>
                         <span className="text-xs tabular" style={{ color: c.subs.length === 0 || isHundred(subTotal) ? "var(--muted)" : "var(--rose)" }}>
-                          {c.subs.length > 0 ? `Total sub ${fmtPercent(subTotal)}%` : "Belum ada sub"}
+                          Total sub {fmtPercent(subTotal)}% · Sisa {fmtPercent(100 - subTotal)}% ({rupiah(catAmount * (100 - subTotal) / 100)})
                         </span>
                       </div>
                       {c.subs.map((s) => (
@@ -1896,16 +1892,6 @@ function AllocationEditor({ user, onSave, onCancel, onLogout, initialCategories,
                           <button className="icon-btn" onClick={() => removeSub(c.id, s.id)}><Trash2 size={14} color="var(--rose)" /></button>
                         </div>
                       ))}
-                      {c.subs.length > 0 && !isHundred(subTotal) && (
-                        <button
-                          type="button"
-                          className="btn-ghost text-xs"
-                          style={{ alignSelf: "flex-start" }}
-                          onClick={() => setCategories(categories.map((x) => x.id === c.id ? { ...x, subs: autoBalance(x.subs) } : x))}
-                        >
-                          Pas-kan otomatis ke 100%
-                        </button>
-                      )}
                       <div className="flex gap-2 mt-1 flex-wrap">
                         <input style={{ flex: 1, minWidth: 140 }} placeholder="Tambah sub baru" value={newSubName} onChange={(e) => setNewSubName(e.target.value)} onKeyDown={onEnter(() => addSub(c))} />
                         <NewValueInput value={newSubPercent} onValue={setNewSubPercent} mode={newSubMode} onMode={setNewSubMode} />
@@ -2543,6 +2529,17 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
           </div>
         )}
 
+        {!isAsset && (
+          <div className="card p-6">
+            <DailySpendingChart
+              monthTx={monthTx}
+              periodStart={activePeriod.startDate}
+              periodEnd={getPeriodEnd(activePeriod, periods) || todayStr()}
+              subCategories={cat.subs}
+            />
+          </div>
+        )}
+
         {cat.subs.length > 0 && (
           <div className="card p-6">
             <p className="muted text-xs uppercase tracking-wide mb-3">Rincian sub-alokasi</p>
@@ -2676,17 +2673,6 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
             <button className="btn-ghost" onClick={addRecurringTemplate}><Plus size={16} /></button>
           </div>
         </div>
-
-        {!isAsset && (
-          <div className="card p-6">
-            <DailySpendingChart
-              monthTx={monthTx}
-              periodStart={activePeriod.startDate}
-              periodEnd={getPeriodEnd(activePeriod, periods) || todayStr()}
-              subCategories={cat.subs}
-            />
-          </div>
-        )}
 
         <div>
           <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
@@ -4233,6 +4219,8 @@ function assistantActionLabel(action, categories) {
   }
   return "Usulan tindakan keuangan";
 }
+
+const SHOW_PUNDI_ASSISTANT = false;
 
 function AssistantChat({ user, transactions, onApplyAction }) {
   const [open, setOpen] = useState(false);
@@ -5899,7 +5887,7 @@ export default function App() {
         </div>
       )}
       {content}
-      {user && accountLoaded && !pendingUser && (
+      {SHOW_PUNDI_ASSISTANT && user && accountLoaded && !pendingUser && (
         <AssistantChat
           user={user}
           transactions={transactions}
