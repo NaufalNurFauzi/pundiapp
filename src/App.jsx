@@ -733,7 +733,7 @@ function ProgressBar({ percent, color }) {
 function SpendingTrendChart({ user, transactions }) {
   const [hoveredPeriod, setHoveredPeriod] = useState(null);
   const [selectedPeriodId, setSelectedPeriodId] = useState(null);
-  const [viewMode, setViewMode] = useState("total");
+  const [viewMode, setViewMode] = useState("spent");
   const periods = getSalaryPeriods(user);
   const trendPeriods = (periods.length ? periods : [getActivePeriod(user)]).slice(-6);
   const values = trendPeriods.map((period) => ({
@@ -742,12 +742,15 @@ function SpendingTrendChart({ user, transactions }) {
     label: `Periode mulai ${dateLabel(period.startDate)}`,
     shortLabel: dateAtLocalMidnight(period.startDate).toLocaleDateString("id-ID", { day: "numeric", month: "short" }),
     endDate: getPeriodEnd(period, periods) || todayStr(),
-    total: transactionsForPeriod(transactions, period, periods, user)
+    income: Number(period.amount || 0) + transactionsForPeriod(transactions, period, periods, user)
+      .filter(isTopupTx)
+      .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0),
+    spent: transactionsForPeriod(transactions, period, periods, user)
       .filter(isExpenseTx)
-      .reduce((sum, transaction) => sum + Number(transaction.amount), 0),
+      .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0),
   })).map((value) => {
     const days = Math.max(1, Math.round((dateAtLocalMidnight(value.endDate) - dateAtLocalMidnight(value.period.startDate)) / 86400000) + 1);
-    return { ...value, days, average: value.total / days };
+    return { ...value, days };
   });
   const selectedId = values.some((value) => value.id === selectedPeriodId)
     ? selectedPeriodId
@@ -755,39 +758,46 @@ function SpendingTrendChart({ user, transactions }) {
   const selectedValue = values.find((value) => value.id === selectedId);
   const selectedIndex = values.findIndex((value) => value.id === selectedId);
   const previousValue = values[selectedIndex - 1];
-  const measureValue = (value) => viewMode === "daily" ? value.average : value.total;
-  const maxValue = Math.max(...values.map(measureValue), 1);
   const points = values.map((value, index) => ({
     ...value,
-    plottedValue: measureValue(value),
     x: values.length === 1 ? 210 : 52 + (index * 316) / (values.length - 1),
-    y: 128 - (measureValue(value) / maxValue) * 92,
   }));
-  const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+  const metricKey = viewMode === "income" ? "income" : "spent";
+  const metricLabel = viewMode === "income" ? "Income" : "Outcome";
+  const metricColor = viewMode === "income" ? "var(--teal)" : "var(--rose)";
+  const maxValue = Math.max(1, ...values.map((value) => value[metricKey]));
+  const yFor = (value) => 128 - (value / maxValue) * 92;
+  const path = points.map((point, index) =>
+    `${index === 0 ? "M" : "L"} ${point.x} ${yFor(point[metricKey])}`
+  ).join(" ");
   const hoveredPoint = points.find((point) => point.id === hoveredPeriod);
   const activePoint = hoveredPoint || points.find((point) => point.id === selectedId);
-  const previousMeasure = previousValue ? measureValue(previousValue) : null;
-  const selectedMeasure = selectedValue ? measureValue(selectedValue) : 0;
-  const changePercent = previousMeasure > 0
-    ? ((selectedMeasure - previousMeasure) / previousMeasure) * 100
+  const changePercent = previousValue?.[metricKey] > 0
+    ? ((selectedValue[metricKey] - previousValue[metricKey]) / previousValue[metricKey]) * 100
     : null;
+  const shortAmount = (value) => value >= 1000000
+    ? `${Math.round(value / 1000000)}jt`
+    : value >= 1000 ? `${Math.round(value / 1000)}k` : String(Math.round(value));
+  const tooltipX = activePoint?.x > 270 ? activePoint.x - 172 : (activePoint?.x || 0) + 10;
 
   return (
     <div className="spending-trend-chart flex flex-col gap-2">
       <div className="flex items-center justify-between gap-2 flex-wrap">
-        <p className="muted text-xs uppercase tracking-wide">Tren Pengeluaran</p>
-        <div className="flex gap-1" role="group" aria-label="Ukuran grafik pengeluaran">
+        <p className="muted text-xs uppercase tracking-wide">Tren {metricLabel} Bulanan</p>
+        <div className="flex gap-1" role="group" aria-label="Pilih grafik income atau outcome">
           {[
-            { id: "total", label: "Total" },
-            { id: "daily", label: "Rata-rata/hari" },
+            { id: "income", label: "Income" },
+            { id: "spent", label: "Outcome" },
           ].map((mode) => (
             <button
               key={mode.id}
               type="button"
               className="btn-ghost text-xs"
               aria-pressed={viewMode === mode.id}
-              onClick={() => setViewMode(mode.id)}
-              style={viewMode === mode.id ? { borderColor: "var(--gold)", color: "var(--gold)", padding: "6px 10px" } : { padding: "6px 10px" }}
+              onClick={() => { setViewMode(mode.id); setHoveredPeriod(null); }}
+              style={viewMode === mode.id
+                ? { borderColor: mode.id === "income" ? "var(--teal)" : "var(--rose)", color: mode.id === "income" ? "var(--teal)" : "var(--rose)", padding: "6px 10px" }
+                : { padding: "6px 10px" }}
             >
               {mode.label}
             </button>
@@ -795,8 +805,16 @@ function SpendingTrendChart({ user, transactions }) {
         </div>
       </div>
       <svg className="spending-trend-svg" viewBox="0 0 420 190" preserveAspectRatio="xMidYMid meet" style={{ overflow: "visible" }}>
-        {[36, 82, 128].map((y) => <line key={y} x1="28" y1={y} x2="392" y2={y} stroke="var(--border)" strokeWidth="0.5" opacity="0.5" />)}
-        <path d={path} fill="none" stroke="var(--gold)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        {[0, 0.5, 1].map((ratio) => {
+          const y = 128 - ratio * 92;
+          return (
+            <g key={ratio}>
+              <line x1="48" y1={y} x2="392" y2={y} stroke="var(--border)" strokeWidth="0.5" opacity="0.5" />
+              <text x="42" y={y + 3} textAnchor="end" fontSize="9" fill="var(--muted)">{shortAmount(maxValue * ratio)}</text>
+            </g>
+          );
+        })}
+        <path d={path} fill="none" stroke={metricColor} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
         {points.map((point) => (
           <g
             key={point.id}
@@ -811,25 +829,24 @@ function SpendingTrendChart({ user, transactions }) {
             }}
             role="button"
             tabIndex={0}
-            aria-label={`${point.label}: ${rupiah(point.total)} total, rata-rata ${rupiah(point.average)} per hari`}
+            aria-label={`${point.label}: ${metricLabel.toLowerCase()} ${rupiah(point[metricKey])}`}
             aria-pressed={selectedId === point.id}
             style={{ cursor: "pointer", outline: "none" }}
           >
             <rect x={point.x - 48} y="16" width="96" height="128" fill="transparent" />
-            {selectedId === point.id && <circle cx={point.x} cy={point.y} r="9" fill="var(--gold)" opacity=".18" />}
-            <circle cx={point.x} cy={point.y} r={hoveredPeriod === point.id || selectedId === point.id ? 5.5 : 4} fill="var(--gold)" stroke={selectedId === point.id ? "var(--text)" : "none"} strokeWidth="1.5" />
+            {selectedId === point.id && (
+              <circle cx={point.x} cy={yFor(point[metricKey])} r="9" fill={metricColor} opacity=".18" />
+            )}
+            <circle cx={point.x} cy={yFor(point[metricKey])} r={hoveredPeriod === point.id || selectedId === point.id ? 5 : 3.5} fill={metricColor} stroke={selectedId === point.id ? "var(--text)" : "none"} strokeWidth="1.5" />
             <text x={point.x} y="158" textAnchor="middle" fontSize="11" fill={selectedId === point.id ? "var(--text)" : "var(--muted)"}>{point.shortLabel}</text>
-            <title>{`${point.label}: ${rupiah(point.total)} total, ${rupiah(point.average)} per hari`}</title>
+            <title>{`${point.label}: ${metricLabel.toLowerCase()} ${rupiah(point[metricKey])}`}</title>
           </g>
         ))}
         {activePoint && (
           <g pointerEvents="none">
-            <rect x={activePoint.x > 300 ? activePoint.x - 158 : activePoint.x + 10} y="8" width="148" height="50" rx="6" fill="var(--surface)" stroke="var(--gold)" />
-            <text x={activePoint.x > 300 ? activePoint.x - 148 : activePoint.x + 20} y="25" fontSize="10" fill="var(--muted)">{activePoint.shortLabel} · {activePoint.days} hari</text>
-            <text x={activePoint.x > 300 ? activePoint.x - 148 : activePoint.x + 20} y="43" fontSize="11" fill="var(--text)" fontWeight="700">
-              {viewMode === "daily" ? rupiah(activePoint.average) : rupiah(activePoint.total)}
-              {viewMode === "daily" ? " / hari" : ""}
-            </text>
+            <rect x={tooltipX} y="8" width="162" height="62" rx="6" fill="var(--surface)" stroke="var(--border)" />
+            <text x={tooltipX + 10} y="25" fontSize="10" fill="var(--muted)">{activePoint.shortLabel} · {activePoint.days} hari</text>
+            <text x={tooltipX + 10} y="47" fontSize="11" fill={metricColor} fontWeight="700">{metricLabel} {rupiah(activePoint[metricKey])}</text>
           </g>
         )}
       </svg>
@@ -838,13 +855,14 @@ function SpendingTrendChart({ user, transactions }) {
           <div className="flex items-end justify-between gap-3">
             <div>
               <p className="muted text-xs">{dateLabel(selectedValue.period.startDate)} – {dateLabel(selectedValue.endDate)}</p>
-              <p className="display tabular" style={{ fontSize: 18, fontWeight: 700 }}>
-                {rupiah(selectedValue.total)}
-                <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}> · {rupiah(selectedValue.average)}/hari</span>
+              <p className="display tabular mt-2" style={{ fontSize: 18, fontWeight: 700, color: metricColor }}>
+                {rupiah(selectedValue[metricKey])}
               </p>
             </div>
             {previousValue && (
-              <p className="text-xs text-right" style={{ color: changePercent === null ? "var(--muted)" : changePercent > 0 ? "var(--rose)" : changePercent < 0 ? "var(--teal)" : "var(--muted)" }}>
+              <p className="text-xs text-right" style={{ color: changePercent === null || changePercent === 0
+                ? "var(--muted)"
+                : (changePercent > 0) === (viewMode === "income") ? "var(--teal)" : "var(--rose)" }}>
                 {changePercent === null
                   ? "Belum ada pembanding"
                   : `${changePercent > 0 ? "+" : ""}${changePercent.toFixed(1)}% vs periode sebelumnya`}
