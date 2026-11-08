@@ -2751,7 +2751,9 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
         .map((sub) => ({ categoryId: category.id, subId: sub.id }));
     });
   const borrowSourceOptions = eligibleBorrowSources(subId || null);
-  const hasPeriodLoans = allMonthTx.some((transaction) =>
+  const relevantLoans = getOutstandingAllocationLoans(user, transactions)
+    .filter((loan) => loan.fromCategoryId === cat.id || loan.toCategoryId === cat.id);
+  const hasPeriodLoanActivity = allMonthTx.some((transaction) =>
     transaction.allocationRepayment && transaction.categoryId === cat.id
   ) || allMonthTx.some((transaction) =>
     isExpenseTx(transaction) &&
@@ -2765,9 +2767,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
         transaction.borrowedFromSubId &&
         transaction.subId !== transaction.borrowedFromSubId))
   );
-  const relevantLoans = getOutstandingAllocationLoans(user, transactions)
-    .filter((loan) => loan.fromCategoryId === cat.id || loan.toCategoryId === cat.id);
-
+  const hasPeriodLoans = relevantLoans.length > 0 && hasPeriodLoanActivity;
   const submitSetor = async () => {
     const dateError = newTransactionDateError(user, date);
     if (dateError) { setFormError(dateError); return; }
