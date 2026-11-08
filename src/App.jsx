@@ -63,6 +63,34 @@ function friendlyErrorMessage(error, fallback) {
   }
   return fallback;
 }
+function registrationRateLimitMessage(error, exhaustedAt = new Date()) {
+  const message = String(error?.message || error || "");
+  const isRateLimit = Number(error?.status) === 429 ||
+    ["over_email_send_rate_limit", "over_request_rate_limit", "rate_limit_exceeded"].includes(String(error?.code || "").toLowerCase()) ||
+    /rate limit|too many requests|over_email_send_rate_limit|over_request_rate_limit/i.test(message);
+  if (!isRateLimit) return null;
+
+  const retryAfterHeader = error?.headers?.get?.("Retry-After")
+    || error?.context?.headers?.get?.("Retry-After");
+  const retryAfterSeconds = Number(error?.retryAfter || error?.retry_after || retryAfterHeader);
+  const messageSeconds = message.match(/(?:after|retry in)\s+(\d+)\s+seconds?/i);
+  const waitSeconds = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+    ? retryAfterSeconds
+    : messageSeconds
+      ? Number(messageSeconds[1])
+      : 60 * 60;
+  const availableAt = new Date(exhaustedAt.getTime() + waitSeconds * 1000);
+  const formatDateTime = (date) => date.toLocaleString("id-ID", {
+    day: "numeric",
+    month: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const isEstimate = !(Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) && !messageSeconds;
+  return `Limit sesi pembuatan akun tercapai pada ${formatDateTime(exhaustedAt)}. ` +
+    `${isEstimate ? "Estimasi sesi baru dapat dimulai " : "Coba mulai sesi baru "}${formatDateTime(availableAt)}` +
+    `${isEstimate ? " (perkiraan sekitar 1 jam; waktu reset dapat berbeda)." : "."}`;
+}
 const todayStr = () => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -77,6 +105,11 @@ const isWithdrawTx = (t) => t.type === "withdraw";
 const isAssetTopupTx = (t) => t.type === "asset_topup" || t.directAsset;
 const isAssetOpeningTx = (t) => t.type === "asset_opening" || t.type === "asset_topup";
 const isAssetMonthlyDepositTx = (t) => t.type === "expense" || !t.type;
+const isOutcomeTx = (transaction, assetCategoryIds) => {
+  if (isWithdrawTx(transaction)) return true;
+  if (!isExpenseTx(transaction)) return false;
+  return !(assetCategoryIds.has(transaction.categoryId) && isAssetMonthlyDepositTx(transaction));
+};
 const isDepositTx = (t) => isAssetOpeningTx(t) || !!t.directAsset;
 const dateAtLocalMidnight = (value) => new Date(`${value}T00:00:00`);
 const dateString = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -208,8 +241,10 @@ function transactionBorrowedFromAssetAmount(transaction, user) {
     ? transactionBorrowedAmount(transaction)
     : 0;
 }
-function assetLoanRepayments(user, categoryId, subId = undefined) {
-  return getSalaryPeriods(user).flatMap((period) => period.allocationRepayments || [])
+function assetLoanRepayments(user, categoryId, subId = undefined, asOfDate = null) {
+  return getSalaryPeriods(user)
+    .filter((period) => !asOfDate || period.startDate <= asOfDate)
+    .flatMap((period) => period.allocationRepayments || [])
     .filter((repayment) =>
       repayment.toCategoryId === categoryId &&
       (subId === undefined || (repayment.toSubId || null) === (subId || null))
@@ -576,11 +611,14 @@ function getAssetCategoryCatalog(user) {
 
 /* Asset deposits and withdrawals remain attached to their historical category
    even after that category is removed from the current allocation plan. */
-function assetBalance(transactions, catId, subId = undefined, user = null, excludedTransactionId = null) {
-  const balanceTransactions = excludedTransactionId
-    ? transactions.filter((transaction) => transaction.id !== excludedTransactionId)
-    : transactions;
+function assetBalance(transactions, catId, subId = undefined, user = null, excludedTransactionId = null, asOfDate = null) {
+  const balanceTransactions = transactions.filter((transaction) =>
+    transaction.id !== excludedTransactionId && (!asOfDate || transaction.date <= asOfDate)
+  );
   const assetCategoryIds = new Set(user ? getAssetCategoryCatalog(user).map((category) => category.id) : []);
+  const salaryPeriods = user
+    ? getSalaryPeriods(user).filter((period) => !asOfDate || period.startDate <= asOfDate)
+    : [];
   const matches = (t) => t.categoryId === catId && (subId === undefined ? true : (t.subId || null) === subId);
   const deposits = balanceTransactions.filter((t) => matches(t) && (
     isDepositTx(t) || (assetCategoryIds.has(t.categoryId) && isAssetMonthlyDepositTx(t))
@@ -594,11 +632,12 @@ function assetBalance(transactions, catId, subId = undefined, user = null, exclu
       (subId === undefined || (transaction.borrowedFromSubId || null) === (subId || null))
     ).reduce((sum, transaction) => sum + transactionBorrowedAmount(transaction), 0)
     : 0;
-  const repaymentsOut = user && assetCategoryIds.has(catId)
-    ? getSalaryPeriods(user).reduce((sum, period) =>
+  const repaymentsOut = assetCategoryIds.has(catId)
+    ? salaryPeriods.reduce((sum, period) =>
       sum + assetLoanRepaymentsOutForPeriod(period, catId, subId), 0)
     : 0;
-  return deposits + (user ? assetLoanRepayments(user, catId, subId) : 0) - withdrawals - loans - repaymentsOut;
+  const repaymentsIn = user ? assetLoanRepayments(user, catId, subId, asOfDate) : 0;
+  return deposits + repaymentsIn - withdrawals - loans - repaymentsOut;
 }
 
 /* True "sisa saldo" — a running cash balance that rolls forward across periods.
@@ -735,6 +774,7 @@ function SpendingTrendChart({ user, transactions }) {
   const [selectedPeriodId, setSelectedPeriodId] = useState(null);
   const [viewMode, setViewMode] = useState("spent");
   const periods = getSalaryPeriods(user);
+  const assetCategoryIds = new Set(getAssetCategoryCatalog(user).map((category) => category.id));
   const trendPeriods = (periods.length ? periods : [getActivePeriod(user)]).slice(-6);
   const values = trendPeriods.map((period) => ({
     id: period.id,
@@ -746,7 +786,7 @@ function SpendingTrendChart({ user, transactions }) {
       .filter(isTopupTx)
       .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0),
     spent: transactionsForPeriod(transactions, period, periods, user)
-      .filter(isExpenseTx)
+      .filter((transaction) => isOutcomeTx(transaction, assetCategoryIds))
       .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0),
   })).map((value) => {
     const days = Math.max(1, Math.round((dateAtLocalMidnight(value.endDate) - dateAtLocalMidnight(value.period.startDate)) / 86400000) + 1);
@@ -1090,7 +1130,7 @@ function DailySpendingChart({ monthTx, periodStart, periodEnd, subCategories = [
   );
 }
 
-function MonthlyHistorySpendingChart({ monthTx, periodStart, periodEnd, categories }) {
+function MonthlyHistorySpendingChart({ user, monthTx, periodStart, periodEnd, categories }) {
   const [hoveredDay, setHoveredDay] = useState(null);
   const [selectedCategoryId, setSelectedCategoryId] = useState("all");
   const days = [];
@@ -1099,7 +1139,8 @@ function MonthlyHistorySpendingChart({ monthTx, periodStart, periodEnd, categori
   }
   const dayCount = Math.max(days.length, 1);
   const colors = ["#C9A24B", "#3E8E7E", "#C4604A", "#6E8FB0", "#9B7EBD", "#7FAE8B", "#B58AC4", "#D17A45", "#568A9F", "#A66B83", "#8C9440", "#7663A6"];
-  const spendingTx = monthTx.filter(isExpenseTx);
+  const assetCategoryIds = new Set(getAssetCategoryCatalog(user).map((category) => category.id));
+  const spendingTx = monthTx.filter((transaction) => isOutcomeTx(transaction, assetCategoryIds));
   const hasUnallocatedSpending = spendingTx.some((transaction) => !transaction.categoryId);
   const subOptions = categories.flatMap((category) => (category.subs || []).map((sub) => ({
     value: `__sub:${category.id}:${sub.id}`,
@@ -2375,11 +2416,13 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
 
   const monthTx = transactionsForPeriod(transactions, activePeriod, periods, user);
   const expenses = monthTx.filter(isExpenseTx);
+  const assetCategoryIds = new Set(getAssetCategoryCatalog(user).map((category) => category.id));
+  const outcomes = monthTx.filter((transaction) => isOutcomeTx(transaction, assetCategoryIds));
   const topups = monthTx.filter(isTopupTx);
   const globalTopup = topups.filter((t) => !t.categoryId).reduce((s, t) => s + Number(t.amount), 0);
   const totalTopup = topups.reduce((s, t) => s + Number(t.amount), 0);
   const effectiveIncome = income + globalTopup;
-  const totalSpent = expenses.reduce((s, t) => s + Number(t.amount), 0);
+  const totalSpent = outcomes.reduce((s, t) => s + Number(t.amount), 0);
   const cashIncome = income + totalTopup;
   const thisMonthNet = cashIncome - expenses.reduce((sum, transaction) =>
     sum + Number(transaction.amount || 0) - transactionBorrowedFromAssetAmount(transaction, user), 0) -
@@ -2552,12 +2595,17 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
                     </>
                   )}
                   {pct >= 80 && pct < 100 && (
-                    <p className="text-xs mt-1" style={{ color: "#D9A441" }}>⚠ Hampir mencapai limit</p>
+                    <p className="text-xs mt-1" style={{ color: "#D9A441" }}>
+                      {c.isAsset ? "Hampir mencapai target" : "⚠ Hampir mencapai limit"}
+                    </p>
                   )}
-                  {pct === 100 && (
+                  {pct >= 100 && c.isAsset && (
+                    <p className="text-xs mt-1" style={{ color: "var(--teal)" }}>Sudah mencapai target</p>
+                  )}
+                  {pct === 100 && !c.isAsset && (
                     <p className="text-xs mt-1" style={{ color: "#e50000" }}>⚠ Sudah mencapai limit</p>
                   )}
-                  {pct > 100 && (
+                  {pct > 100 && !c.isAsset && (
                     <p className="text-xs mt-1" style={{ color: "var(--rose)" }}>⚠ Melebihi alokasi</p>
                   )}
                 </button>
@@ -2887,8 +2935,8 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
                 sehingga saldo awal tidak membuat progres bulanan melebihi target.
               </p>
               <div className="mt-3"><ProgressBar percent={catPct} color={catPct > 100 ? "var(--rose)" : catPct >= 80 ? "#D9A441" : "var(--gold)"} /></div>
-              {catPct >= 80 && catPct <= 100 && <p className="text-xs mt-1" style={{ color: "#D9A441" }}>⚠ Setoran bulan ini hampir mencapai target alokasi</p>}
-              {catPct > 100 && <p className="text-xs mt-1" style={{ color: "var(--rose)" }}>⚠ Setoran bulan ini sudah melebihi target alokasi</p>}
+              {catPct >= 80 && catPct < 100 && <p className="text-xs mt-1" style={{ color: "#D9A441" }}>Hampir mencapai target</p>}
+              {catPct >= 100 && <p className="text-xs mt-1" style={{ color: "var(--teal)" }}>Sudah mencapai target</p>}
             </>
           ) : (
             <>
@@ -2984,9 +3032,14 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
                     {isAsset && <p className="sub-allocation-amount muted text-xs mb-1">Setor bulan ini: {rupiah(subSpent)} dari target {rupiah(subAlloc)}</p>}
                     {!isAsset && <p className="sub-allocation-amount muted text-xs mb-1">Sisa: <span style={{ color: subRemaining < 0 ? "var(--rose)" : "var(--teal)" }}>{rupiah(subRemaining)}</span></p>}
                     <ProgressBar percent={subPct} color={subPct > 100 ? "var(--rose)" : subPct >= 80 ? "#D9A441" : COLORS[si % COLORS.length]} />
-                    {subPct >= 80 && subPct < 100 && <p className="text-xs mt-1" style={{ color: "#D9A441" }}>⚠ Hampir mencapai limit</p>}
-                    {subPct === 100 && <p className="text-xs mt-1" style={{ color: "#e50000" }}>⚠ Sudah mencapai limit</p>}
-                    {subPct > 100 && <p className="text-xs mt-1" style={{ color: "var(--rose)" }}>⚠ Melebihi alokasi</p>}
+                    {subPct >= 80 && subPct < 100 && (
+                      <p className="text-xs mt-1" style={{ color: "#D9A441" }}>
+                        {isAsset ? "Hampir mencapai target" : "⚠ Hampir mencapai limit"}
+                      </p>
+                    )}
+                    {subPct >= 100 && isAsset && <p className="text-xs mt-1" style={{ color: "var(--teal)" }}>Sudah mencapai target</p>}
+                    {subPct === 100 && !isAsset && <p className="text-xs mt-1" style={{ color: "#e50000" }}>⚠ Sudah mencapai limit</p>}
+                    {subPct > 100 && !isAsset && <p className="text-xs mt-1" style={{ color: "var(--rose)" }}>⚠ Melebihi alokasi</p>}
                   </div>
                 );
               })}
@@ -3500,13 +3553,13 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
     if (target === "sub" && !subId) return;
     const saved = await onSubmit({
       id: uid(),
-      type: target === "asset" || target === "asset_opening" ? "asset_opening" : "topup",
+      type: target === "asset_opening" ? "asset_opening" : "topup",
       categoryId: target === "global" ? null : categoryId,
       subId: target === "sub" ? subId : null,
       amount: amt,
       note: note.trim(),
       date,
-      directAsset: target === "asset" || target === "asset_opening",
+      directAsset: target === "asset_opening",
     });
     if (saved === false) setTransactionError("Transaksi belum berhasil disimpan. Coba lagi.");
   };
@@ -3535,7 +3588,8 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "global")} onClick={() => { setTarget("global"); setTransactionError(""); }}>Seluruh Alokasi</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "category")} onClick={() => { setTarget("category"); setTransactionError(""); }}>Kategori Tertentu</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "sub")} onClick={() => { setTarget("sub"); setTransactionError(""); }}>Sub-alokasi Tertentu</button>
-              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "asset" || target === "asset_opening")} onClick={() => chooseTarget("asset_opening")}>Saldo Awal Aset</button>
+              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "asset")} onClick={() => chooseTarget("asset")}>Alokasi Investasi</button>
+              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "asset_opening")} onClick={() => chooseTarget("asset_opening")}>Saldo Awal Aset</button>
             </div>
           </Field>
 
@@ -3675,7 +3729,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
               </select>
             </Field>
           )}
-          {target === "asset" && assetCategories.length > 0 && <p className="muted text-xs">Dana ini langsung menambah saldo kategori aset dan tidak dihitung sebagai pemakaian alokasi.</p>}
+          {target === "asset" && assetCategories.length > 0 && <p className="muted text-xs">Dana ini menambah alokasi investasi periode ini. Saldo aset bertambah setelah setoran dicatat.</p>}
           {target === "asset_opening" && assetCategories.length > 0 && <p className="muted text-xs">Catat total aset yang sudah kamu miliki. Saldo ini menambah equity dan tidak dihitung sebagai setoran bulan berjalan.</p>}
           {target === "asset" && assetCategories.length === 0 && (
             <p className="text-sm" style={{ color: "var(--rose)" }}>Belum ada kategori Tabungan/Investasi. Tandai kategori sebagai aset lewat Edit Alokasi dulu.</p>
@@ -3746,6 +3800,8 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
 
   const monthT = transactionsForPeriod(transactions, selectedPeriod, periods, user);
   const expenses = monthT.filter(isExpenseTx);
+  const assetCategoryIds = new Set(getAssetCategoryCatalog(user).map((category) => category.id));
+  const outcomes = monthT.filter((transaction) => isOutcomeTx(transaction, assetCategoryIds));
   const topups = monthT.filter(isTopupTx);
   const assetTopups = monthT.filter((t) => isAssetTopupTx(t) && !isAssetOpeningTx(t));
   const assetOpenings = monthT.filter(isAssetOpeningTx);
@@ -3756,7 +3812,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
   const selectedIncome = Number(selectedPeriod.amount || 0);
   const hasIncomeRecord = historyPeriods.some((period) => period.id === selectedPeriod.id);
   const effectiveIncome = selectedIncome + globalTopup;
-  const totalSpent = expenses.reduce((s, t) => s + Number(t.amount), 0);
+  const totalSpent = outcomes.reduce((s, t) => s + Number(t.amount), 0);
   const cashIncome = selectedIncome + totalTopup;
   const thisMonthNet = cashIncome - expenses.reduce((sum, transaction) =>
     sum + Number(transaction.amount || 0) - transactionBorrowedFromAssetAmount(transaction, user), 0) -
@@ -3765,7 +3821,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
   const balance = cumulativeBalanceUpTo(user, transactions, selectedEnd);
   const prevCarry = balance - thisMonthNet;
   const totalAssetBalance = getAssetCategoryCatalog(user).reduce(
-    (sum, category) => sum + assetBalance(transactions, category.id, undefined, user),
+    (sum, category) => sum + assetBalance(transactions, category.id, undefined, user, null, selectedEnd),
     0
   );
 
@@ -3801,7 +3857,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
     id: period.id,
     period,
     spent: transactionsForPeriod(transactions, period, periods, user)
-      .filter(isExpenseTx)
+      .filter((transaction) => isOutcomeTx(transaction, assetCategoryIds))
       .reduce((sum, transaction) => sum + Number(transaction.amount), 0),
   }));
   const trendMax = Math.max(1, ...trendData.map((item) => item.spent));
@@ -3994,6 +4050,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
 
         <div className="card p-6">
           <MonthlyHistorySpendingChart
+            user={user}
             monthTx={monthT}
             periodStart={selectedPeriod.startDate}
             periodEnd={selectedEnd}
@@ -5909,9 +5966,10 @@ export default function App() {
     if (error) {
       console.error("Registration failed", error);
       setBusy(false);
-      setAuthError(error.code === "23505"
+      const rateLimitMessage = registrationRateLimitMessage(error);
+      setAuthError(rateLimitMessage || (error.code === "23505"
         ? "Username atau email sudah digunakan. Coba gunakan username atau email lain."
-        : friendlyErrorMessage(error, "Akun belum dapat dibuat. Periksa data dan coba lagi."));
+        : friendlyErrorMessage(error, "Akun belum dapat dibuat. Periksa data dan coba lagi.")));
       return;
     }
     if (authData.user?.identities?.length === 0) {
