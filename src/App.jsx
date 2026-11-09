@@ -3327,8 +3327,8 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
 }
 
 /* ---------- App ---------- */
-/* ---------- Add money modal ---------- */
-class AddMoneyModalBoundary extends Component {
+/* ---------- Add money page ---------- */
+class AddMoneyPageBoundary extends Component {
   state = { hasError: false };
 
   static getDerivedStateFromError() {
@@ -3336,20 +3336,17 @@ class AddMoneyModalBoundary extends Component {
   }
 
   componentDidCatch(error) {
-    console.error("Add money modal render failed", error);
+    console.error("Add money page render failed", error);
   }
 
   render() {
     if (!this.state.hasError) return this.props.children;
     return (
-      <div className="modal-overlay anim-fade" role="alert">
-        <div className="card p-6" style={{ maxWidth: 440, width: "100%" }}>
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="display" style={{ fontSize: 18, fontWeight: 700 }}>Formulir gaji tidak dapat dimuat</h2>
-            <button className="icon-btn" onClick={this.props.onClose} aria-label="Tutup formulir"><X size={18} /></button>
-          </div>
-          <p className="muted text-sm mt-3">Data alokasi akun ini tidak dapat ditampilkan. Tutup formulir, lalu muat ulang halaman.</p>
-          <button className="btn-primary mt-4" onClick={this.props.onClose}>Tutup</button>
+      <div className="min-h-screen p-4 md:p-8">
+        <div className="card p-6 max-w-lg mx-auto" role="alert">
+          <h2 className="display" style={{ fontSize: 18, fontWeight: 700 }}>Formulir tambah uang tidak dapat dimuat</h2>
+          <p className="muted text-sm mt-3">Data alokasi akun ini tidak dapat ditampilkan. Kembali ke dashboard, lalu muat ulang halaman.</p>
+          <button className="btn-primary mt-4" onClick={this.props.onBack}>Kembali ke Dashboard</button>
         </div>
       </div>
     );
@@ -3378,16 +3375,58 @@ function defaultAllocationRepayments(loans, categories, salary) {
   }));
 }
 
-function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, initialTarget = "global" }) {
+function splitAmountByPercent(amount, allocations) {
+  const totalPercent = allocations.reduce((sum, allocation) => sum + Number(allocation.percent || 0), 0);
+  if (!Number.isFinite(amount) || !Number.isFinite(totalPercent) || !(totalPercent > 0) ||
+      allocations.some((allocation) => !Number.isFinite(Number(allocation.percent)) || Number(allocation.percent) < 0)) {
+    return new Map();
+  }
+  const shares = allocations.map((allocation, index) => {
+    const exactAmount = amount * Number(allocation.percent || 0) / totalPercent;
+    return {
+      id: allocation.id,
+      index,
+      amount: Math.floor(exactAmount),
+      remainder: exactAmount - Math.floor(exactAmount),
+    };
+  });
+  let difference = amount - shares.reduce((sum, share) => sum + share.amount, 0);
+  const order = [...shares].sort((a, b) =>
+    difference >= 0
+      ? b.remainder - a.remainder || a.index - b.index
+      : a.remainder - b.remainder || a.index - b.index
+  );
+  let cursor = 0;
+  while (difference !== 0 && order.length) {
+    const share = order[cursor % order.length];
+    if (difference > 0) {
+      share.amount += 1;
+      difference -= 1;
+    } else if (share.amount > 0) {
+      share.amount -= 1;
+      difference += 1;
+    }
+    cursor += 1;
+  }
+  return new Map(shares.map((share) => [share.id, share.amount]));
+}
+
+function AddMoneyPage({ user, transactions, onBack, onLogout, onSubmit, onSubmitBatch, onSalarySubmit, initialTarget = "bonus" }) {
   const userCategories = Array.isArray(user.categories)
     ? user.categories.filter((category) => category && typeof category === "object")
     : [];
-  const [target, setTarget] = useState(initialTarget); // global | category | sub | asset | asset_opening | salary
+  const [target, setTarget] = useState(initialTarget); // bonus | category | sub | asset | asset_opening | salary
   const [categoryId, setCategoryId] = useState(userCategories[0]?.id || "");
   const [subId, setSubId] = useState("");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const [date, setDate] = useState(todayStr());
+  const [bonusAllocations, setBonusAllocations] = useState(() => [{
+    id: uid(),
+    categoryId: userCategories[0]?.id || "",
+    subId: "",
+    percent: "100",
+  }]);
   const activePeriod = getActivePeriod(user);
   const [salaryAmount, setSalaryAmount] = useState(String(activePeriod.amount || user.income || ""));
   const [salaryDate, setSalaryDate] = useState(todayStr());
@@ -3406,6 +3445,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
   const [editingSalaryAllocation, setEditingSalaryAllocation] = useState(false);
   const [salaryError, setSalaryError] = useState("");
   const [salaryBusy, setSalaryBusy] = useState(false);
+  const [bonusBusy, setBonusBusy] = useState(false);
   const [transactionError, setTransactionError] = useState("");
 
   const assetCategories = userCategories.filter((c) => c.isAsset);
@@ -3433,6 +3473,11 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
     salaryCategories,
     Number(salaryAmount) || 0
   );
+  const previewBonusAllocations = bonusAllocations.filter((allocation) => Number(allocation.percent) > 0);
+  const previewBonusShares = splitAmountByPercent(
+    Math.round(Number(amount) || 0),
+    previewBonusAllocations
+  );
 
   const chooseCategory = (id) => { setCategoryId(id); setSubId(""); };
   const chooseTarget = (nextTarget) => {
@@ -3441,7 +3486,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
     setTransactionError("");
     if (nextTarget === "asset" || nextTarget === "asset_opening") {
       setCategoryId(assetCategories[0]?.id || "");
-    } else if (nextTarget === "global") {
+    } else if (nextTarget === "bonus") {
       setCategoryId(userCategories[0]?.id || "");
     } else if (nextTarget === "salary") {
       setSalaryError("");
@@ -3542,6 +3587,69 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
       }
       return;
     }
+    if (target === "bonus") {
+      const transactionDateMessage = newTransactionDateError(user, date);
+      if (transactionDateMessage) {
+        setTransactionError(transactionDateMessage);
+        return;
+      }
+      const amt = Math.round(Number(amount));
+      if (!Number.isFinite(amt) || !(amt > 0) || amt > 1_000_000_000_000) {
+        setTransactionError("Nominal bonus harus lebih dari 0 dan tidak boleh melebihi Rp1.000.000.000.000.");
+        return;
+      }
+      const validatedAllocations = bonusAllocations.map((allocation) => {
+        const category = userCategories.find((item) => item.id === allocation.categoryId);
+        const sub = category?.subs?.find((item) => item.id === allocation.subId);
+        const percent = Number(allocation.percent);
+        return { ...allocation, category, sub, percent };
+      });
+      if (validatedAllocations.some((allocation) =>
+        !allocation.category || (allocation.subId && !allocation.sub) ||
+        !Number.isFinite(allocation.percent) || allocation.percent < 0
+      )) {
+        setTransactionError("Pilih kategori dan sub-alokasi bonus yang valid.");
+        return;
+      }
+      const totalPercent = validatedAllocations.reduce((sum, allocation) => sum + allocation.percent, 0);
+      if (Math.abs(totalPercent - 100) > 0.01) {
+        setTransactionError("Total persentase alokasi bonus harus tepat 100%.");
+        return;
+      }
+      const activeAllocations = validatedAllocations.filter((allocation) => allocation.percent > 0);
+      if (!activeAllocations.length) {
+        setTransactionError("Tambahkan minimal satu tujuan alokasi bonus.");
+        return;
+      }
+      const bonusShares = splitAmountByPercent(amt, activeAllocations);
+      const bonusTransactions = activeAllocations.map((allocation) => {
+        const allocationAmount = bonusShares.get(allocation.id) || 0;
+        const destination = allocation.sub
+          ? `${allocation.category.name} - ${allocation.sub.name}`
+          : allocation.category.name;
+        return {
+          id: uid(),
+          type: "topup",
+          categoryId: allocation.category.id,
+          subId: allocation.sub?.id || null,
+          amount: allocationAmount,
+          note: `${note.trim() || "Alokasi bonus"} · ${destination} (${allocation.percent}%)`,
+          date,
+        };
+      }).filter((transaction) => transaction.amount > 0);
+      setBonusBusy(true);
+      setTransactionError("");
+      try {
+        const saved = await onSubmitBatch(bonusTransactions);
+        if (saved === false) setTransactionError("Alokasi bonus belum berhasil disimpan. Coba lagi.");
+      } catch (error) {
+        console.error("Bonus allocation save failed", error);
+        setTransactionError(friendlyErrorMessage(error, "Alokasi bonus belum berhasil disimpan. Coba lagi."));
+      } finally {
+        setBonusBusy(false);
+      }
+      return;
+    }
     const transactionDateMessage = newTransactionDateError(user, date);
     if (transactionDateMessage) {
       setTransactionError(transactionDateMessage);
@@ -3554,7 +3662,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
     const saved = await onSubmit({
       id: uid(),
       type: target === "asset_opening" ? "asset_opening" : "topup",
-      categoryId: target === "global" ? null : categoryId,
+      categoryId,
       subId: target === "sub" ? subId : null,
       amount: amt,
       note: note.trim(),
@@ -3567,25 +3675,22 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
   const tabStyle = (active) => active ? { borderColor: "var(--gold)", color: "var(--gold)" } : {};
 
   return (
-    <div className="modal-overlay anim-fade" onClick={onClose}>
-      <div
-        className="card p-6 anim-pop add-money-modal"
-        style={{ maxWidth: 440, width: "100%" }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between mb-1">
-          <h2 className="display" style={{ fontSize: 18, fontWeight: 700 }}>Tambah Uang</h2>
-          <button className="icon-btn" onClick={onClose}><X size={18} /></button>
+    <div className="min-h-screen">
+      <TopBar name={user.name} onLogout={onLogout} right={
+        <button className="btn-ghost text-sm flex items-center gap-2" onClick={onBack}><ArrowLeft size={14} /> Dashboard</button>
+      } />
+      <div className="p-4 md:p-8 max-w-2xl mx-auto flex flex-col gap-6 anim-fade-up">
+        <div>
+          <h1 className="display" style={{ fontSize: 22, fontWeight: 700 }}>Tambah Uang</h1>
+          <p className="muted text-sm mt-1">Catat gaji, alokasikan bonus, atau tambahkan dana ke kategori dan aset.</p>
         </div>
-        <p className="muted text-sm mb-4">
-          Catat gaji baru atau tambahkan dana ke alokasi dan aset.
-        </p>
 
-        <div className="flex flex-col gap-4 add-money-modal-content">
+        <div className="card p-6">
+        <div className="flex flex-col gap-4">
           <Field label="Tujuan dana">
             <div className={`flex gap-2 flex-wrap${target === "salary" ? " salary-target-list" : ""}`}>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "salary")} onClick={() => chooseTarget("salary")}>Gaji Bulanan</button>
-              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "global")} onClick={() => { setTarget("global"); setTransactionError(""); }}>Seluruh Alokasi</button>
+              <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "bonus")} onClick={() => chooseTarget("bonus")}>Alokasi Bonus</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "category")} onClick={() => { setTarget("category"); setTransactionError(""); }}>Kategori Tertentu</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "sub")} onClick={() => { setTarget("sub"); setTransactionError(""); }}>Sub-alokasi Tertentu</button>
               <button type="button" className="btn-ghost text-sm" style={tabStyle(target === "asset")} onClick={() => chooseTarget("asset")}>Alokasi Investasi</button>
@@ -3713,6 +3818,111 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
           )}
 
           {target !== "salary" && <>
+          {target === "bonus" && (
+            <div className="flex flex-col gap-3">
+              <p className="muted text-xs">
+                Alokasikan dana tambahan tanpa mengubah persentase gaji bulanan. Contoh: catat gaji rutin Rp6.000.000 seperti biasa, lalu masukkan bonus Rp2.000.000 dan bagi sesuai persentase khusus di sini.
+              </p>
+              <Field label="Pembagian bonus">
+                <div className="flex flex-col gap-3">
+                  {bonusAllocations.map((allocation) => {
+                    const selectedCategory = userCategories.find((category) => category.id === allocation.categoryId);
+                    return (
+                      <div key={allocation.id} className="card2 p-3 flex flex-col gap-2">
+                        <div className="flex gap-2 flex-wrap">
+                          <select
+                            aria-label="Kategori alokasi bonus"
+                            value={allocation.categoryId}
+                            onChange={(event) => {
+                              setBonusAllocations((current) => current.map((item) => item.id === allocation.id
+                                ? { ...item, categoryId: event.target.value, subId: "" }
+                                : item));
+                              setTransactionError("");
+                            }}
+                            style={{ flex: "1 1 160px" }}
+                          >
+                            {userCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+                          </select>
+                          {selectedCategory?.subs?.length > 0 && (
+                            <select
+                              aria-label="Sub-alokasi bonus"
+                              value={allocation.subId}
+                              onChange={(event) => {
+                                setBonusAllocations((current) => current.map((item) => item.id === allocation.id
+                                  ? { ...item, subId: event.target.value }
+                                  : item));
+                                setTransactionError("");
+                              }}
+                              style={{ flex: "1 1 160px" }}
+                            >
+                              <option value="">Alokasi kategori</option>
+                              {selectedCategory.subs.map((sub) => <option key={sub.id} value={sub.id}>{sub.name}</option>)}
+                            </select>
+                          )}
+                          <div className="flex items-center gap-1" style={{ flex: "0 0 110px" }}>
+                            <input
+                              aria-label="Persentase alokasi bonus"
+                              type="number"
+                              min="0"
+                              max="100"
+                              step="0.01"
+                              value={allocation.percent}
+                              onChange={(event) => {
+                                setBonusAllocations((current) => current.map((item) => item.id === allocation.id
+                                  ? { ...item, percent: event.target.value }
+                                  : item));
+                                setTransactionError("");
+                              }}
+                              style={{ minWidth: 0 }}
+                            />
+                            <span className="muted">%</span>
+                          </div>
+                          {bonusAllocations.length > 1 && (
+                            <button
+                              type="button"
+                              className="icon-btn"
+                              aria-label="Hapus alokasi bonus"
+                              onClick={() => setBonusAllocations((current) => current.filter((item) => item.id !== allocation.id))}
+                            ><Trash2 size={14} color="var(--rose)" /></button>
+                          )}
+                        </div>
+                        <p className="muted text-xs">
+                          {rupiah(previewBonusShares.get(allocation.id) || 0)}
+                        </p>
+                      </div>
+                    );
+                  })}
+                  {!userCategories.length && <p className="text-sm" style={{ color: "var(--rose)" }}>Buat kategori lewat Edit Alokasi sebelum membagi bonus.</p>}
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="btn-ghost text-sm flex items-center gap-2"
+                      onClick={() => {
+                        setBonusAllocations((current) => [...current, {
+                          id: uid(),
+                          categoryId: userCategories[0]?.id || "",
+                          subId: "",
+                          percent: "0",
+                        }]);
+                        setTransactionError("");
+                      }}
+                      disabled={!userCategories.length}
+                    ><Plus size={14} /> Tambah tujuan</button>
+                    <span
+                      className="text-sm"
+                      style={{
+                        color: Math.abs(bonusAllocations.reduce((sum, item) => sum + (Number(item.percent) || 0), 0) - 100) < 0.01
+                          ? "var(--teal)"
+                          : "var(--gold)",
+                      }}
+                    >
+                      Total {bonusAllocations.reduce((sum, item) => sum + (Number(item.percent) || 0), 0)}%
+                    </span>
+                  </div>
+                </div>
+              </Field>
+            </div>
+          )}
           {(target === "category" || target === "sub" || target === "asset" || target === "asset_opening") && (
             <Field label="Kategori">
               <select value={categoryId} onChange={(e) => chooseCategory(e.target.value)}>
@@ -3738,8 +3948,8 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
             <p className="text-sm" style={{ color: "var(--rose)" }}>Kategori ini belum punya sub-alokasi. Tambahkan lewat Edit Alokasi dulu.</p>
           )}
 
-          <Field label="Nominal">
-            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="cth. 500000" />
+          <Field label={target === "bonus" ? "Nominal bonus (di luar gaji rutin)" : "Nominal"}>
+            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={target === "bonus" ? "cth. 2000000" : "cth. 500000"} />
           </Field>
           <Field label="Tanggal">
             <input
@@ -3758,13 +3968,13 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
           <button
             className="btn-primary flex items-center justify-center gap-2 mt-1"
             onClick={submit}
-            disabled={!(Number(amount) > 0) || ((target === "sub" || target === "asset" || target === "asset_opening") && !cat) || ((target === "asset" || target === "asset_opening") && !cat?.isAsset)}
+            disabled={!(Number(amount) > 0) || bonusBusy || (target === "bonus" && !userCategories.length) || ((target === "sub" || target === "asset" || target === "asset_opening") && !cat) || ((target === "asset" || target === "asset_opening") && !cat?.isAsset)}
           >
-            <Plus size={16} /> Tambahkan Dana
+            <Plus size={16} /> {bonusBusy ? "Menyimpan..." : target === "bonus" ? "Alokasikan Bonus" : "Tambahkan Dana"}
           </button>
           </>}
         </div>
-      </div>
+        </div>
       {editingSalaryAllocation && (
         <AllocationEditor
           user={{ ...user, categories: salaryCategories }}
@@ -3780,6 +3990,7 @@ function AddMoneyModal({ user, transactions, onClose, onSubmit, onSalarySubmit, 
           }}
         />
       )}
+      </div>
     </div>
   );
 }
@@ -5658,10 +5869,10 @@ export default function App() {
   const [authNotice, setAuthNotice] = useState("");
   const [transactionNotice, setTransactionNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [page, setPage] = useState("dashboard"); // dashboard | category | editAlloc | monthlyHistory | settings | goals
+  const [page, setPage] = useState("dashboard"); // dashboard | category | editAlloc | monthlyHistory | settings | goals | addMoney
   const [activeCategoryId, setActiveCategoryId] = useState(null);
   const [pendingUser, setPendingUser] = useState(null); // holds new account while welcome modal shows
-  const [showAddMoney, setShowAddMoney] = useState(false);
+  const [addMoneyTarget, setAddMoneyTarget] = useState("bonus");
   const [showForgotPassword, setShowForgotPassword] = useState(false);
   const [passwordRecovery, setPasswordRecovery] = useState(false);
   const [showResetAccount, setShowResetAccount] = useState(false);
@@ -6099,6 +6310,29 @@ export default function App() {
       return false;
     }
   };
+  const handleAddTxBatch = async (items) => {
+    if (!items.length) return false;
+    const dateError = newTransactionDateError(user, items[0].date);
+    if (dateError || items.some((item) => item.date !== items[0].date)) {
+      setAuthError(dateError || "Tanggal alokasi bonus harus sama.");
+      return false;
+    }
+    const createdAt = new Date().toISOString();
+    const transactionsToSave = items.map((item) => ({
+      ...item,
+      created_at: item.created_at || item.createdAt || createdAt,
+    }));
+    try {
+      await enqueueTransactionSave(user.id, () =>
+        supabase.from("transactions").upsert(transactionsToSave.map((item) => transactionRow(user.id, item)))
+      );
+      setTransactions((current) => [...current, ...transactionsToSave].sort((a, b) => a.date.localeCompare(b.date)));
+      setTransactionNotice("Alokasi bonus berhasil ditambahkan.");
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const handleUpdateTx = async (updatedTx) => {
     const existingTransaction = transactions.find((transaction) => transaction.id === updatedTx.id);
     const transaction = {
@@ -6205,7 +6439,7 @@ export default function App() {
     }
     userRef.current = nextUser;
     setUser(nextUser);
-    setShowAddMoney(false);
+    setPage("dashboard");
     return true;
   };
 
@@ -6492,6 +6726,29 @@ export default function App() {
           onLogout={handleLogout}
         />
       );
+    } else if (page === "addMoney") {
+      content = (
+        <AddMoneyPageBoundary onBack={() => setPage("dashboard")}>
+          <AddMoneyPage
+            user={user}
+            transactions={transactions}
+            initialTarget={addMoneyTarget}
+            onBack={() => setPage("dashboard")}
+            onLogout={handleLogout}
+            onSubmit={async (tx) => {
+              const saved = await handleAddTx(tx);
+              if (saved) setPage("dashboard");
+              return saved;
+            }}
+            onSubmitBatch={async (items) => {
+              const saved = await handleAddTxBatch(items);
+              if (saved) setPage("dashboard");
+              return saved;
+            }}
+            onSalarySubmit={handleConfirmMonthIncome}
+          />
+        </AddMoneyPageBoundary>
+      );
     } else if (page === "goals") {
       content = (
         <GoalsPage
@@ -6520,8 +6777,8 @@ export default function App() {
           accountLoaded={accountLoaded}
           onOpenCategory={(id) => { setActiveCategoryId(id); setPage("category"); }}
           onEditAlloc={() => setPage("editAlloc")}
-          onAddMoney={() => setShowAddMoney("global")}
-          onAddSalary={() => setShowAddMoney("salary")}
+          onAddMoney={() => { setAddMoneyTarget("bonus"); setPage("addMoney"); }}
+          onAddSalary={() => { setAddMoneyTarget("salary"); setPage("addMoney"); }}
           onViewHistory={() => setPage("monthlyHistory")}
           onOpenSettings={() => setPage("settings")}
           onOpenGoals={() => setPage("goals")}
@@ -6575,22 +6832,6 @@ export default function App() {
           transactions={transactions}
           onApplyAction={handleAssistantAction}
         />
-      )}
-      {showAddMoney && (
-        <AddMoneyModalBoundary onClose={() => setShowAddMoney(false)}>
-          <AddMoneyModal
-            user={user}
-            transactions={transactions}
-            initialTarget={showAddMoney === "salary" ? "salary" : "global"}
-            onClose={() => setShowAddMoney(false)}
-            onSubmit={async (tx) => {
-              const saved = await handleAddTx(tx);
-              if (saved) setShowAddMoney(false);
-              return saved;
-            }}
-            onSalarySubmit={handleConfirmMonthIncome}
-          />
-        </AddMoneyModalBoundary>
       )}
       {showResetAccount && (
         <ResetAccountModal
