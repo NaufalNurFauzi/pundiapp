@@ -192,23 +192,26 @@ function transactionsForPeriod(transactions, period, periods = [], user = null) 
         transactionCreatedAt < nextPeriodCreatedAt);
     return startsInPeriod && endsInPeriod;
   });
-  return [...periodTransactions, ...periodAllocationTransferTransactions(transactions, period, user)];
+  const allocationRepayments = user
+    ? allocationRepaymentsForPeriod(user, transactions, period)
+    : period.allocationRepayments || [];
+  return [...periodTransactions, ...periodAllocationTransferTransactions(transactions, period, user, allocationRepayments)];
 }
 function periodCarryoverAmount(period, categoryId, subId = undefined) {
   return (period.carryovers || [])
     .filter((item) => item.categoryId === categoryId && (subId === undefined || (item.subId || null) === (subId || null)))
     .reduce((sum, item) => sum + Number(item.amount || 0), 0);
 }
-function periodAllocationAdjustment(period, categoryId) {
-  return (period.allocationRepayments || []).reduce((sum, repayment) => {
+function periodAllocationAdjustment(period, categoryId, repayments = period.allocationRepayments || []) {
+  return repayments.reduce((sum, repayment) => {
     const amount = Number(repayment.amount || 0);
     if (repayment.toCategoryId === categoryId &&
         repayment.fromCategoryId !== categoryId) sum += amount;
     return sum;
   }, 0);
 }
-function periodSubAllocationBase(period, categoryId, baseAllocation) {
-  const categoryLevelAdjustment = (period.allocationRepayments || []).reduce((sum, repayment) => {
+function periodSubAllocationBase(period, categoryId, baseAllocation, repayments = period.allocationRepayments || []) {
+  const categoryLevelAdjustment = repayments.reduce((sum, repayment) => {
     const amount = Number(repayment.amount || 0);
     if (repayment.toCategoryId === categoryId &&
         repayment.fromCategoryId !== categoryId &&
@@ -217,8 +220,8 @@ function periodSubAllocationBase(period, categoryId, baseAllocation) {
   }, 0);
   return baseAllocation + categoryLevelAdjustment;
 }
-function periodSubAllocationAdjustment(period, categoryId, subId) {
-  return (period.allocationRepayments || []).reduce((sum, repayment) => {
+function periodSubAllocationAdjustment(period, categoryId, subId, repayments = period.allocationRepayments || []) {
+  return repayments.reduce((sum, repayment) => {
     if (repayment.toCategoryId === categoryId && repayment.toSubId === subId) {
       return sum + Number(repayment.amount || 0);
     }
@@ -241,32 +244,34 @@ function transactionBorrowedFromAssetAmount(transaction, user) {
     ? transactionBorrowedAmount(transaction)
     : 0;
 }
-function assetLoanRepayments(user, categoryId, subId = undefined, asOfDate = null) {
+function assetLoanRepayments(user, categoryId, subId = undefined, asOfDate = null, transactions = []) {
   return getSalaryPeriods(user)
     .filter((period) => !asOfDate || period.startDate <= asOfDate)
-    .flatMap((period) => period.allocationRepayments || [])
+    .flatMap((period) => allocationRepaymentsForPeriod(user, transactions, period))
     .filter((repayment) =>
       repayment.toCategoryId === categoryId &&
       (subId === undefined || (repayment.toSubId || null) === (subId || null))
     )
     .reduce((sum, repayment) => sum + Number(repayment.amount || 0), 0);
 }
-function assetLoanRepaymentTotalForPeriod(user, period) {
+function assetLoanRepaymentTotalForPeriod(user, period, transactions = []) {
   const assetCategoryIds = new Set(getAssetCategoryCatalog(user).map((category) => category.id));
-  return (period.allocationRepayments || [])
+  return allocationRepaymentsForPeriod(user, transactions, period)
     .filter((repayment) => assetCategoryIds.has(repayment.toCategoryId))
     .reduce((sum, repayment) => sum + Number(repayment.amount || 0), 0);
 }
-function assetLoanRepaymentsForPeriod(period, categoryId, subId = undefined) {
-  return (period.allocationRepayments || [])
+function assetLoanRepaymentsForPeriod(period, categoryId, subId = undefined, user = null, transactions = []) {
+  const repayments = user ? allocationRepaymentsForPeriod(user, transactions, period) : period.allocationRepayments || [];
+  return repayments
     .filter((repayment) =>
       repayment.toCategoryId === categoryId &&
       (subId === undefined || (repayment.toSubId || null) === (subId || null))
     )
     .reduce((sum, repayment) => sum + Number(repayment.amount || 0), 0);
 }
-function assetLoanRepaymentsOutForPeriod(period, categoryId, subId = undefined) {
-  return (period.allocationRepayments || [])
+function assetLoanRepaymentsOutForPeriod(period, categoryId, subId = undefined, user = null, transactions = []) {
+  const repayments = user ? allocationRepaymentsForPeriod(user, transactions, period) : period.allocationRepayments || [];
+  return repayments
     .filter((repayment) =>
       repayment.fromCategoryId === categoryId &&
       (subId === undefined || (repayment.fromSubId || null) === (subId || null))
@@ -316,6 +321,24 @@ function allocationSubSpent(transactions, categoryId, subId) {
     return sum + spentByTarget + borrowedFromSub;
   }, 0);
 }
+function capSubAllocationRemaining(category, subId, categoryRemaining, getSubRemaining) {
+  const subs = category?.subs || [];
+  const rawRemainings = subs.map((sub) => getSubRemaining(sub.id));
+  const totalSubRemaining = rawRemainings.reduce((sum, amount) => sum + amount, 0);
+  const subIndex = subs.findIndex((sub) => sub.id === subId);
+  if (subIndex < 0 || totalSubRemaining <= categoryRemaining) {
+    return subIndex < 0 ? 0 : rawRemainings[subIndex];
+  }
+  const weights = rawRemainings.map((amount) => Math.max(0, amount));
+  let totalWeight = weights.reduce((sum, amount) => sum + amount, 0);
+  if (!(totalWeight > 0)) {
+    weights.forEach((amount, index) => { weights[index] = Math.abs(rawRemainings[index]); });
+    totalWeight = weights.reduce((sum, amount) => sum + amount, 0);
+  }
+  return totalWeight > 0
+    ? rawRemainings[subIndex] - (totalSubRemaining - categoryRemaining) * weights[subIndex] / totalWeight
+    : rawRemainings[subIndex];
+}
 function allocationRemaining(user, transactions, period, categoryId, excludedTransactionId = null) {
   const category = (period.categories || user.categories).find((item) => item.id === categoryId)
     || user.categories.find((item) => item.id === categoryId);
@@ -326,7 +349,7 @@ function allocationRemaining(user, transactions, period, categoryId, excludedTra
   const categoryTopups = periodTransactions.filter((transaction) => isTopupTx(transaction) && transaction.categoryId === categoryId)
     .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
   const allocated = (Number(period.amount || 0) + globalTopups) * category.percent / 100 +
-    periodAllocationAdjustment(period, categoryId) +
+    periodAllocationAdjustment(period, categoryId, allocationRepaymentsForPeriod(user, transactions, period)) +
     categoryTopups +
     periodCarryoverAmount(period, categoryId);
   const spendingTransactions = excludedTransactionId
@@ -343,22 +366,31 @@ function allocationSubRemaining(user, transactions, period, categoryId, subId, e
     .filter((transaction) => transaction.id !== excludedTransactionId);
   const globalTopups = periodTransactions.filter((transaction) => isTopupTx(transaction) && !transaction.categoryId)
     .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+  const repayments = allocationRepaymentsForPeriod(user, transactions, period);
   const baseAllocated = periodSubAllocationBase(
     period,
     categoryId,
-    (Number(period.amount || 0) + globalTopups) * category.percent / 100
+    (Number(period.amount || 0) + globalTopups) * category.percent / 100,
+    repayments
   );
-  const subTopups = periodTransactions
-    .filter((transaction) => isTopupTx(transaction) && transaction.categoryId === categoryId && transaction.subId === subId)
-    .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
-  const subSpent = allocationSubSpent(periodTransactions, categoryId, subId);
-  const allocated = baseAllocated * sub.percent / 100 +
-    periodSubAllocationAdjustment(period, categoryId, subId) +
-    subTopups +
-    periodCarryoverAmount(period, categoryId, subId);
-  return Math.min(
+  const subRemaining = (targetSubId) => {
+    const targetSub = category.subs.find((item) => item.id === targetSubId);
+    if (!targetSub) return 0;
+    const subTopups = periodTransactions
+      .filter((transaction) => isTopupTx(transaction) && transaction.categoryId === categoryId && transaction.subId === targetSubId)
+      .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0);
+    const subSpent = allocationSubSpent(periodTransactions, categoryId, targetSubId);
+    const allocated = baseAllocated * targetSub.percent / 100 +
+      periodSubAllocationAdjustment(period, categoryId, targetSubId, repayments) +
+      subTopups +
+      periodCarryoverAmount(period, categoryId, targetSubId);
+    return allocated - subSpent;
+  };
+  return capSubAllocationRemaining(
+    category,
+    subId,
     allocationRemaining(user, transactions, period, categoryId, excludedTransactionId),
-    allocated - subSpent
+    subRemaining
   );
 }
 function allocationLoanKey(fromCategoryId, toCategoryId, fromSubId = null, toSubId = null) {
@@ -366,7 +398,7 @@ function allocationLoanKey(fromCategoryId, toCategoryId, fromSubId = null, toSub
     ? [fromCategoryId, toCategoryId, fromSubId || null, toSubId || null]
     : [fromCategoryId, toCategoryId]);
 }
-function getOutstandingAllocationLoans(user, transactions, beforeDate = null, beforeCreatedAt = null) {
+function getOutstandingAllocationLoans(user, transactions, beforeDate = null, beforeCreatedAt = null, excludedRepaymentPeriodId = null) {
   const cutoffTimestamp = timestampValue(beforeCreatedAt);
   const occursBeforeCutoff = (date, createdAt) => !beforeDate ||
     date < beforeDate ||
@@ -384,8 +416,8 @@ function getOutstandingAllocationLoans(user, transactions, beforeDate = null, be
   ).forEach((transaction) => {
     const borrowedAmount = transactionBorrowedAmount(transaction);
     if (borrowedAmount <= 0) return;
-    const fromSubId = transaction.categoryId === transaction.borrowedFromCategoryId ? transaction.subId : null;
-    const toSubId = transaction.categoryId === transaction.borrowedFromCategoryId ? transaction.borrowedFromSubId : null;
+    const fromSubId = transaction.subId || null;
+    const toSubId = transaction.borrowedFromSubId || null;
     const key = allocationLoanKey(transaction.categoryId, transaction.borrowedFromCategoryId, fromSubId, toSubId);
     events.push({
       key,
@@ -395,7 +427,8 @@ function getOutstandingAllocationLoans(user, transactions, beforeDate = null, be
       type: "loan",
     });
   });
-  getSalaryPeriods(user).filter((period) => occursBeforeCutoff(period.startDate, period.createdAt))
+  getSalaryPeriods(user)
+    .filter((period) => period.id !== excludedRepaymentPeriodId && occursBeforeCutoff(period.startDate, period.createdAt))
     .forEach((period) => (period.allocationRepayments || []).forEach((repayment) => {
       const key = allocationLoanKey(repayment.fromCategoryId, repayment.toCategoryId, repayment.fromSubId, repayment.toSubId);
       events.push({
@@ -410,16 +443,94 @@ function getOutstandingAllocationLoans(user, transactions, beforeDate = null, be
     (timestampValue(a.createdAt) ?? 0) - (timestampValue(b.createdAt) ?? 0) ||
     Number(a.type !== "repayment") - Number(b.type !== "repayment"));
   const balances = new Map();
+  const loanOrder = [];
   events.forEach((event) => {
-    const amount = balances.get(event.key) || 0;
-    balances.set(event.key, event.type === "loan"
-      ? amount + event.amount
-      : Math.max(0, amount - event.amount));
+    if (event.type === "loan") {
+      if (!balances.has(event.key)) loanOrder.push(event.key);
+      balances.set(event.key, (balances.get(event.key) || 0) + event.amount);
+      return;
+    }
+    const [fromCategoryId, toCategoryId, fromSubId = null, toSubId = null] = JSON.parse(event.key);
+    const repaymentKeys = fromSubId || toSubId
+      ? [event.key]
+      : [
+          event.key,
+          ...loanOrder.filter((key) => {
+            const [loanFromCategoryId, loanToCategoryId] = JSON.parse(key);
+            return key !== event.key &&
+              loanFromCategoryId === fromCategoryId &&
+              loanToCategoryId === toCategoryId;
+          }),
+        ];
+    let remainingRepayment = Math.max(0, event.amount);
+    repaymentKeys.forEach((key) => {
+      if (!(remainingRepayment > 0)) return;
+      const outstanding = balances.get(key) || 0;
+      const applied = Math.min(outstanding, remainingRepayment);
+      balances.set(key, outstanding - applied);
+      remainingRepayment -= applied;
+    });
   });
   return [...balances.entries()].filter(([, amount]) => amount > 0).map(([key, amount]) => {
     const [fromCategoryId, toCategoryId, fromSubId = null, toSubId = null] = JSON.parse(key);
     return { key, fromCategoryId, toCategoryId, fromSubId, toSubId, amount };
   });
+}
+function allocationRepaymentsForPeriod(user, transactions, period) {
+  const repayments = period.allocationRepayments || [];
+  if (!repayments.length) return repayments;
+  const outstanding = getOutstandingAllocationLoans(
+    user,
+    transactions,
+    period.startDate,
+    period.createdAt,
+    period.id
+  );
+  const balances = new Map(outstanding.map((loan) => [loan.key, loan.amount]));
+  const resolved = [];
+  repayments.forEach((repayment) => {
+    if (repayment.fromSubId || repayment.toSubId) {
+      const key = allocationLoanKey(
+        repayment.fromCategoryId,
+        repayment.toCategoryId,
+        repayment.fromSubId,
+        repayment.toSubId
+      );
+      balances.set(key, Math.max(0, (balances.get(key) || 0) - Number(repayment.amount || 0)));
+      resolved.push(repayment);
+      return;
+    }
+    let remaining = Math.max(0, Number(repayment.amount || 0));
+    const matchingLoans = outstanding.filter((loan) =>
+      loan.fromCategoryId === repayment.fromCategoryId &&
+      loan.toCategoryId === repayment.toCategoryId
+    ).sort((a, b) =>
+      Number(!!a.fromSubId || !!a.toSubId) - Number(!!b.fromSubId || !!b.toSubId)
+    );
+    matchingLoans.forEach((loan) => {
+      if (!(remaining > 0)) return;
+      const balance = balances.get(loan.key) || 0;
+      const applied = Math.min(balance, remaining);
+      if (applied > 0) {
+        resolved.push({
+          ...repayment,
+          fromSubId: loan.fromSubId,
+          toSubId: loan.toSubId,
+          amount: applied,
+        });
+        balances.set(loan.key, balance - applied);
+        remaining -= applied;
+      }
+    });
+    if (remaining > 0) resolved.push({ ...repayment, amount: remaining });
+  });
+  return resolved;
+}
+function periodWithResolvedAllocationRepayments(user, transactions, period) {
+  return {
+    ...period,
+    allocationRepayments: allocationRepaymentsForPeriod(user, transactions, period),
+  };
 }
 function allocationCategoryName(user, categoryId) {
   const currentCategory = user.categories.find((category) => category.id === categoryId);
@@ -437,8 +548,8 @@ function allocationSourceName(user, categoryId, subId) {
   const sub = category?.subs?.find((item) => item.id === subId);
   return sub ? `${categoryName} / ${sub.name}` : categoryName;
 }
-function periodAllocationTransferTransactions(transactions, period, user) {
-  return (period.allocationRepayments || []).flatMap((repayment, index) => {
+function periodAllocationTransferTransactions(transactions, period, user, repayments = period.allocationRepayments || []) {
+  return repayments.flatMap((repayment, index) => {
     const amount = Number(repayment.amount || 0);
     if (!(amount > 0)) return [];
     const borrowerName = allocationSourceName(user, repayment.fromCategoryId, repayment.fromSubId);
@@ -547,7 +658,7 @@ function getPeriodCashRemainder(user, transactions, period, beforeDate = null, b
   const spent = periodTransactions.filter(isExpenseTx)
     .reduce((sum, transaction) =>
       sum + Number(transaction.amount || 0) - transactionBorrowedFromAssetAmount(transaction, user), 0);
-  const assetRepayments = assetLoanRepaymentTotalForPeriod(user, period);
+  const assetRepayments = assetLoanRepaymentTotalForPeriod(user, period, transactions);
   const carriedIn = (period.carryovers || []).reduce((sum, item) => sum + Number(item.amount || 0), 0);
   return Math.max(0, Number(period.amount || 0) + carriedIn + additionalIncome - spent - assetRepayments);
 }
@@ -634,9 +745,9 @@ function assetBalance(transactions, catId, subId = undefined, user = null, exclu
     : 0;
   const repaymentsOut = assetCategoryIds.has(catId)
     ? salaryPeriods.reduce((sum, period) =>
-      sum + assetLoanRepaymentsOutForPeriod(period, catId, subId), 0)
+      sum + assetLoanRepaymentsOutForPeriod(period, catId, subId, user, transactions), 0)
     : 0;
-  const repaymentsIn = user ? assetLoanRepayments(user, catId, subId, asOfDate) : 0;
+  const repaymentsIn = user ? assetLoanRepayments(user, catId, subId, asOfDate, transactions) : 0;
   return deposits + repaymentsIn - withdrawals - loans - repaymentsOut;
 }
 
@@ -655,7 +766,7 @@ function cumulativeBalanceUpTo(user, transactions, dateLimit) {
     sum + Number(transaction.amount) - transactionBorrowedFromAssetAmount(transaction, user), 0);
   const totalAssetRepayments = getSalaryPeriods(user)
     .filter((period) => period.startDate <= dateLimit)
-    .reduce((sum, period) => sum + assetLoanRepaymentTotalForPeriod(user, period), 0);
+    .reduce((sum, period) => sum + assetLoanRepaymentTotalForPeriod(user, period, transactions), 0);
   return totalIncome + totalTopup - totalExpense - totalAssetRepayments;
 }
 
@@ -2400,14 +2511,14 @@ function AppFooter() {
       >
         @naufalnurf__
       </a>
-      <span className="muted"> · v1.4.1</span>
+      <span className="muted"> · v1.4.2</span>
     </footer>
   );
 }
 
 function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout, onEditAlloc, onAddMoney, onAddSalary, onViewHistory, onOpenSettings, onOpenGoals, onOpenCalculator, onDismissIncomeReminder }) {
   const periods = getSalaryPeriods(user);
-  const activePeriod = getActivePeriod(user);
+  const activePeriod = periodWithResolvedAllocationRepayments(user, transactions, getActivePeriod(user));
   const openAllocationLoans = getOutstandingAllocationLoans(user, transactions);
   const periodLabel = `${dateLabel(activePeriod.startDate)} - ${dateLabel(getPeriodEnd(activePeriod, periods) || todayStr())}`;
   const reminderKey = paydayReminderDismissalKey(user);
@@ -2415,7 +2526,6 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
   const income = Number(activePeriod.amount || 0);
 
   const monthTx = transactionsForPeriod(transactions, activePeriod, periods, user);
-  const expenses = monthTx.filter(isExpenseTx);
   const assetCategoryIds = new Set(getAssetCategoryCatalog(user).map((category) => category.id));
   const outcomes = monthTx.filter((transaction) => isOutcomeTx(transaction, assetCategoryIds));
   const topups = monthTx.filter(isTopupTx);
@@ -2424,24 +2534,24 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
   const effectiveIncome = income + globalTopup;
   const totalSpent = outcomes.reduce((s, t) => s + Number(t.amount), 0);
   const cashIncome = income + totalTopup;
-  const thisMonthNet = cashIncome - expenses.reduce((sum, transaction) =>
-    sum + Number(transaction.amount || 0) - transactionBorrowedFromAssetAmount(transaction, user), 0) -
-    assetLoanRepaymentTotalForPeriod(user, activePeriod);
-  const balance = cumulativeBalanceUpTo(user, transactions, todayStr());
+  const nonAssetAllocationRemaining = user.categories
+    .filter((category) => !category.isAsset)
+    .reduce((sum, category) =>
+      sum + allocationRemaining(user, transactions, activePeriod, category.id) -
+        periodCarryoverAmount(activePeriod, category.id), 0);
   const assetCatalog = getAssetCategoryCatalog(user);
   const activeAssetIds = new Set(user.categories.filter((category) => category.isAsset).map((category) => category.id));
   const archivedAssets = assetCatalog.filter((category) =>
     !activeAssetIds.has(category.id) && transactions.some((transaction) => transaction.categoryId === category.id)
   );
   const totalAssets = assetCatalog.reduce((sum, category) => sum + assetBalance(transactions, category.id, undefined, user), 0);
-  const totalEquity = balance + totalAssets;
-  const prevCarry = balance - thisMonthNet;
+  const totalEquity = nonAssetAllocationRemaining + totalAssets;
 
   const spentFor = (catId) => allocationBudgetSpent(monthTx, catId);
   const withdrawFor = (catId) => monthTx.filter((t) => t.categoryId === catId && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const assetDepositFor = (catId) =>
     monthTx.filter((t) => t.categoryId === catId && isAssetMonthlyDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0) +
-    assetLoanRepaymentsForPeriod(activePeriod, catId);
+    assetLoanRepaymentsForPeriod(activePeriod, catId, undefined, user, transactions);
   const directTopupFor = (catId) => topups.filter((t) => t.categoryId === catId && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const subTopupFor = (catId) => topups.filter((t) => t.categoryId === catId && t.subId).reduce((s, t) => s + Number(t.amount), 0);
 
@@ -2506,12 +2616,8 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
             </div>
             <div>
               <p className="muted text-xs uppercase tracking-wide">Sisa Saldo</p>
-              <p className="display tabular" style={{ fontSize: 20, fontWeight: 700, color: "var(--teal)" }}>{rupiah(balance)}</p>
-              {prevCarry !== 0 && (
-                <p className="text-xs mt-0.5 muted">
-                  termasuk {rupiah(prevCarry)} bawaan bulan lalu
-                </p>
-              )}
+              <p className="display tabular" style={{ fontSize: 20, fontWeight: 700, color: "var(--teal)" }}>{rupiah(nonAssetAllocationRemaining)}</p>
+              <p className="text-xs mt-0.5 muted">total sisa alokasi non-aset</p>
             </div>
             <div>
               <p className="muted text-xs uppercase tracking-wide">Total Equity</p>
@@ -2553,9 +2659,12 @@ function Dashboard({ user, transactions, accountLoaded, onOpenCategory, onLogout
           <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
             {user.categories.map((c, i) => {
                 const carryover = periodCarryoverAmount(activePeriod, c.id);
-                const allocated = effectiveIncome * c.percent / 100 + periodAllocationAdjustment(activePeriod, c.id) + directTopupFor(c.id) + subTopupFor(c.id) + carryover;
+                const allocated = effectiveIncome * c.percent / 100 +
+                  periodAllocationAdjustment(activePeriod, c.id, activePeriod.allocationRepayments) +
+                  directTopupFor(c.id) + subTopupFor(c.id) + carryover;
               const spent = c.isAsset
-                ? assetDepositFor(c.id) - withdrawFor(c.id) + assetLoanRepaymentsOutForPeriod(activePeriod, c.id)
+                ? assetDepositFor(c.id) - withdrawFor(c.id) +
+                  assetLoanRepaymentsOutForPeriod(activePeriod, c.id, undefined, user, transactions)
                 : spentFor(c.id);
               const pct = allocated > 0 ? (spent / allocated) * 100 : 0;
               return (
@@ -2666,7 +2775,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   if (!cat) return null;
   const isAsset = !!cat.isAsset;
   const periods = getSalaryPeriods(user);
-  const activePeriod = getActivePeriod(user);
+  const activePeriod = periodWithResolvedAllocationRepayments(user, transactions, getActivePeriod(user));
   const activeMonth = monthKey(activePeriod.startDate);
   const periodLabel = `${dateLabel(activePeriod.startDate)} - ${dateLabel(getPeriodEnd(activePeriod, periods) || todayStr())}`;
   const income = Number(activePeriod.amount || 0);
@@ -2675,18 +2784,24 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const effectiveIncome = income + globalTopup;
   const directTopup = allMonthTx.filter((t) => isTopupTx(t) && t.categoryId === cat.id && !t.subId).reduce((s, t) => s + Number(t.amount), 0);
   const subTopupTotal = allMonthTx.filter((t) => isTopupTx(t) && t.categoryId === cat.id && t.subId).reduce((s, t) => s + Number(t.amount), 0);
-  const baseAllocated = effectiveIncome * cat.percent / 100 + periodAllocationAdjustment(activePeriod, cat.id);
-  const subAllocationBase = periodSubAllocationBase(activePeriod, cat.id, effectiveIncome * cat.percent / 100);
+  const baseAllocated = effectiveIncome * cat.percent / 100 +
+    periodAllocationAdjustment(activePeriod, cat.id, activePeriod.allocationRepayments);
+  const subAllocationBase = periodSubAllocationBase(
+    activePeriod,
+    cat.id,
+    effectiveIncome * cat.percent / 100,
+    activePeriod.allocationRepayments
+  );
   const categoryCarryover = periodCarryoverAmount(activePeriod, cat.id);
   const allocated = baseAllocated + directTopup + subTopupTotal + categoryCarryover;
   const monthTx = allMonthTx.filter((t) => t.categoryId === cat.id);
   const deposited = monthTx.filter(isAssetMonthlyDepositTx).reduce((s, t) => s + Number(t.amount), 0) +
-    assetLoanRepaymentsForPeriod(activePeriod, cat.id);
-  const repaymentOut = assetLoanRepaymentsOutForPeriod(activePeriod, cat.id);
+    assetLoanRepaymentsForPeriod(activePeriod, cat.id, undefined, user, transactions);
+  const repaymentOut = assetLoanRepaymentsOutForPeriod(activePeriod, cat.id, undefined, user, transactions);
   const spent = isAsset ? deposited + repaymentOut : allocationBudgetSpent(allMonthTx, cat.id);
   const withdrawn = monthTx.filter(isWithdrawTx).reduce((s, t) => s + Number(t.amount), 0);
   const netAssetMovement = isAsset ? deposited - withdrawn + repaymentOut : spent;
-  const remaining = allocated - (isAsset ? netAssetMovement : spent);
+  const categoryBudgetRemaining = allocated - (isAsset ? netAssetMovement : spent);
   const catPct = allocated > 0 ? ((isAsset ? netAssetMovement : spent) / allocated) * 100 : 0;
   const catSaldo = assetBalance(transactions, cat.id, undefined, user);
   const history = allMonthTx.filter((t) => t.categoryId === cat.id || t.borrowedFromCategoryId === cat.id).sort((a, b) => (a.date < b.date ? 1 : -1));
@@ -2702,23 +2817,26 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const spentForSub = (sid) => isAsset
     ? monthTx.filter((transaction) => transaction.subId === sid && isAssetMonthlyDepositTx(transaction))
       .reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0) +
-      assetLoanRepaymentsForPeriod(activePeriod, cat.id, sid) +
-      assetLoanRepaymentsOutForPeriod(activePeriod, cat.id, sid)
+      assetLoanRepaymentsForPeriod(activePeriod, cat.id, sid, user, transactions) +
+      assetLoanRepaymentsOutForPeriod(activePeriod, cat.id, sid, user, transactions)
     : allocationSubSpent(allMonthTx, cat.id, sid);
   const withdrawnForSub = (sid) => monthTx.filter((t) => t.subId === sid && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0);
   const topupForSub = (sid) => monthTx.filter((t) => t.subId === sid && isTopupTx(t)).reduce((s, t) => s + Number(t.amount), 0);
 
-  const subAllocationRemaining = (targetSubId) => {
-    if (!targetSubId) return remaining;
+  const rawSubAllocationRemaining = (targetSubId) => {
     const sub = cat.subs.find((item) => item.id === targetSubId);
-    if (!sub) return remaining;
+    if (!sub) return 0;
     const subAlloc = subAllocationBase * sub.percent / 100 +
-      periodSubAllocationAdjustment(activePeriod, cat.id, sub.id) +
+      periodSubAllocationAdjustment(activePeriod, cat.id, sub.id, activePeriod.allocationRepayments) +
       topupForSub(sub.id) +
       periodCarryoverAmount(activePeriod, cat.id, sub.id);
     const subMovement = spentForSub(sub.id) - (isAsset ? withdrawnForSub(sub.id) : 0);
-    return Math.min(remaining, subAlloc - subMovement);
+    return subAlloc - subMovement;
   };
+  const remaining = categoryBudgetRemaining - categoryCarryover;
+  const subAllocationRemaining = (targetSubId) => targetSubId
+    ? capSubAllocationRemaining(cat, targetSubId, categoryBudgetRemaining, rawSubAllocationRemaining)
+    : categoryBudgetRemaining;
   const checkBalance = (amt, targetSubId) => {
     const available = subAllocationRemaining(targetSubId);
     if (amt > available) {
@@ -2727,7 +2845,7 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
     }
     return "";
   };
-  const spendingRemaining = isAsset ? remaining : subAllocationRemaining(subId);
+  const spendingRemaining = isAsset ? categoryBudgetRemaining : subAllocationRemaining(subId);
   const sourceCategory = user.categories.find((category) => category.id === borrowedFromCategoryId);
   const sourceSub = sourceCategory?.subs?.find((sub) => sub.id === borrowedFromSubId);
   const requiredBorrowAmount = Math.max(0, Number(amount || 0) - Math.max(0, spendingRemaining));
@@ -2741,10 +2859,9 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
   const eligibleBorrowSources = (targetSubId) => user.categories
     .flatMap((category) => {
       if (category.id !== cat.id) {
-        return [
-          { categoryId: category.id, subId: null },
-          ...(category.subs || []).map((sub) => ({ categoryId: category.id, subId: sub.id })),
-        ];
+        return category.subs?.length
+          ? category.subs.map((sub) => ({ categoryId: category.id, subId: sub.id }))
+          : [{ categoryId: category.id, subId: null }];
       }
       return (category.subs || [])
         .filter((sub) => targetSubId && sub.id !== targetSubId)
@@ -2824,7 +2941,9 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
       setBorrowPromptStage("");
       return;
     }
-    if (!sourceCategory || (sourceCategory.id === cat.id && (!sourceSub || sourceSub.id === (subId || null)))) {
+    if (!sourceCategory ||
+        (sourceCategory.subs?.length > 0 && !sourceSub) ||
+        (sourceCategory.id === cat.id && (!sourceSub || sourceSub.id === (subId || null)))) {
       setFormError("Pilih alokasi sumber pinjaman yang valid.");
       return;
     }
@@ -3012,11 +3131,25 @@ function CategoryDetail({ user, categoryId, transactions, onBack, onAddTx, onUpd
             <div className="flex flex-col gap-3">
               {cat.subs.map((s, si) => {
                 const subAlloc = subAllocationBase * s.percent / 100 +
-                  periodSubAllocationAdjustment(activePeriod, cat.id, s.id) +
+                  periodSubAllocationAdjustment(activePeriod, cat.id, s.id, activePeriod.allocationRepayments) +
                   topupForSub(s.id) +
                   periodCarryoverAmount(activePeriod, cat.id, s.id);
                 const subSpent = spentForSub(s.id) - (isAsset ? withdrawnForSub(s.id) : 0);
-                const subRemaining = subAlloc - subSpent;
+                const subRemaining = capSubAllocationRemaining(
+                  cat,
+                  s.id,
+                  categoryBudgetRemaining,
+                  (subId) => {
+                    const sub = cat.subs.find((item) => item.id === subId);
+                    if (!sub) return 0;
+                    const allocation = subAllocationBase * sub.percent / 100 +
+                      periodSubAllocationAdjustment(activePeriod, cat.id, sub.id, activePeriod.allocationRepayments) +
+                      topupForSub(sub.id) +
+                      periodCarryoverAmount(activePeriod, cat.id, sub.id);
+                    const movement = spentForSub(sub.id) - (isAsset ? withdrawnForSub(sub.id) : 0);
+                    return allocation - movement;
+                  }
+                );
                 const subPct = subAlloc > 0 ? (subSpent / subAlloc) * 100 : 0;
                 const subSaldo = assetBalance(transactions, cat.id, s.id, user);
                 return (
@@ -3427,7 +3560,7 @@ function AddMoneyPage({ user, transactions, onBack, onLogout, onSubmit, onSubmit
     subId: "",
     percent: "100",
   }]);
-  const activePeriod = getActivePeriod(user);
+  const activePeriod = periodWithResolvedAllocationRepayments(user, transactions, getActivePeriod(user));
   const [salaryAmount, setSalaryAmount] = useState(String(activePeriod.amount || user.income || ""));
   const [salaryDate, setSalaryDate] = useState(todayStr());
   const [salaryAllocationMode, setSalaryAllocationMode] = useState("previous");
@@ -3437,7 +3570,9 @@ function AddMoneyPage({ user, transactions, onBack, onLogout, onSubmit, onSubmit
   const [carryoverSubId, setCarryoverSubId] = useState("");
   const [repaymentAmounts, setRepaymentAmounts] = useState(() => {
     const existingPeriod = getSalaryPeriods(user).find((period) => period.startDate === todayStr());
-    return Object.fromEntries((existingPeriod?.allocationRepayments || []).map((item) => [
+    return Object.fromEntries((existingPeriod
+      ? allocationRepaymentsForPeriod(user, transactions, existingPeriod)
+      : []).map((item) => [
       allocationLoanKey(item.fromCategoryId, item.toCategoryId, item.fromSubId, item.toSubId),
       String(item.amount),
     ]));
@@ -3467,7 +3602,14 @@ function AddMoneyPage({ user, transactions, onBack, onLogout, onSubmit, onSubmit
     ? getPeriodCashRemainder(user, transactions, previousSalaryPeriod, salaryDate, salaryPeriodCreatedAt)
     : 0;
   const carryoverCategory = salaryCategories.find((category) => category.id === carryoverCategoryId) || salaryCategories[0];
-  const outstandingLoans = getOutstandingAllocationLoans(user, transactions, salaryDate, salaryPeriodCreatedAt);
+  const selectedSalaryPeriod = getSalaryPeriods(user).find((period) => period.startDate === salaryDate);
+  const outstandingLoans = getOutstandingAllocationLoans(
+    user,
+    transactions,
+    salaryDate,
+    salaryPeriodCreatedAt,
+    selectedSalaryPeriod?.id
+  );
   const defaultRepayments = defaultAllocationRepayments(
     outstandingLoans,
     salaryCategories,
@@ -3501,7 +3643,14 @@ function AddMoneyPage({ user, transactions, onBack, onLogout, onSubmit, onSubmit
       if (!(salary > 0)) { setSalaryError("Nominal gaji harus lebih dari 0."); return; }
       if (!salaryDate || salaryDate > todayStr()) { setSalaryError("Tanggal gaji tidak boleh di masa depan."); return; }
       const submittedAt = new Date().toISOString();
-      const loansAtSubmission = getOutstandingAllocationLoans(user, transactions, salaryDate, submittedAt);
+      const existingPeriod = getSalaryPeriods(user).find((period) => period.startDate === salaryDate);
+      const loansAtSubmission = getOutstandingAllocationLoans(
+        user,
+        transactions,
+        salaryDate,
+        submittedAt,
+        existingPeriod?.id
+      );
       const defaultRepaymentsAtSubmission = defaultAllocationRepayments(
         loansAtSubmission,
         salaryCategories,
@@ -3713,7 +3862,9 @@ function AddMoneyPage({ user, transactions, onBack, onLogout, onSubmit, onSubmit
                     setSalaryDate(nextDate);
                     setSalaryError("");
                     const existingPeriod = getSalaryPeriods(user).find((period) => period.startDate === nextDate);
-                    setRepaymentAmounts(Object.fromEntries((existingPeriod?.allocationRepayments || []).map((item) => [
+                    setRepaymentAmounts(Object.fromEntries((existingPeriod
+                      ? allocationRepaymentsForPeriod(user, transactions, existingPeriod)
+                      : []).map((item) => [
                       allocationLoanKey(item.fromCategoryId, item.toCategoryId, item.fromSubId, item.toSubId),
                       String(item.amount),
                     ])));
@@ -3998,10 +4149,14 @@ function AddMoneyPage({ user, transactions, onBack, onLogout, onSubmit, onSubmit
 /* ---------- Monthly history ---------- */
 function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, onLogout }) {
   const periods = getSalaryPeriods(user);
-  const activePeriod = getActivePeriod(user);
+  const activePeriod = periodWithResolvedAllocationRepayments(user, transactions, getActivePeriod(user));
   const historyPeriods = periods.length ? periods : [activePeriod];
   const [selectedId, setSelectedId] = useState(activePeriod.id);
-  const selectedPeriod = historyPeriods.find((period) => period.id === selectedId) || activePeriod;
+  const selectedPeriod = periodWithResolvedAllocationRepayments(
+    user,
+    transactions,
+    historyPeriods.find((period) => period.id === selectedId) || activePeriod
+  );
   const historyCategories = selectedPeriod.categories || user.categories;
   const [expandedCat, setExpandedCat] = useState(null);
   const [search, setSearch] = useState("");
@@ -4027,7 +4182,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
   const cashIncome = selectedIncome + totalTopup;
   const thisMonthNet = cashIncome - expenses.reduce((sum, transaction) =>
     sum + Number(transaction.amount || 0) - transactionBorrowedFromAssetAmount(transaction, user), 0) -
-    assetLoanRepaymentTotalForPeriod(user, selectedPeriod);
+    assetLoanRepaymentTotalForPeriod(user, selectedPeriod, transactions);
   const selectedEnd = getPeriodEnd(selectedPeriod, periods) || todayStr();
   const balance = cumulativeBalanceUpTo(user, transactions, selectedEnd);
   const prevCarry = balance - thisMonthNet;
@@ -4041,15 +4196,15 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
   const spentForCat = (catId) => allocationBudgetSpent(monthT, catId);
   const assetDepositForCat = (catId) =>
     monthT.filter((t) => t.categoryId === catId && isAssetMonthlyDepositTx(t)).reduce((s, t) => s + Number(t.amount), 0) +
-    assetLoanRepaymentsForPeriod(selectedPeriod, catId);
+    assetLoanRepaymentsForPeriod(selectedPeriod, catId, undefined, user, transactions);
   const spentForSub = (catId, subId) => {
     const category = historyCategories.find((item) => item.id === catId);
     return category?.isAsset
       ? monthT.filter((transaction) =>
         transaction.categoryId === catId && transaction.subId === subId && isAssetMonthlyDepositTx(transaction)
       ).reduce((sum, transaction) => sum + Number(transaction.amount || 0), 0) +
-        assetLoanRepaymentsForPeriod(selectedPeriod, catId, subId) +
-        assetLoanRepaymentsOutForPeriod(selectedPeriod, catId, subId)
+        assetLoanRepaymentsForPeriod(selectedPeriod, catId, subId, user, transactions) +
+        assetLoanRepaymentsOutForPeriod(selectedPeriod, catId, subId, user, transactions)
       : allocationSubSpent(monthT, catId, subId);
   };
 
@@ -4280,7 +4435,7 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
               const allocated = baseAllocated + directTopup + subTopupTotal + categoryCarryover;
               const spent = c.isAsset
                 ? assetDepositForCat(c.id) - monthT.filter((t) => t.categoryId === c.id && isWithdrawTx(t)).reduce((s, t) => s + Number(t.amount), 0) +
-                  assetLoanRepaymentsOutForPeriod(selectedPeriod, c.id)
+                  assetLoanRepaymentsOutForPeriod(selectedPeriod, c.id, undefined, user, transactions)
                 : spentForCat(c.id);
               const pct = allocated > 0 ? (spent / allocated) * 100 : 0;
               const expanded = expandedCat === c.id;
@@ -4311,14 +4466,31 @@ function MonthlyHistory({ user, transactions, onBack, onUpdateTx, onDeleteTx, on
                           effectiveIncome * c.percent / 100
                         );
                         const subAlloc = subAllocationBase * s.percent / 100 +
-                          periodSubAllocationAdjustment(selectedPeriod, c.id, s.id) +
+                          periodSubAllocationAdjustment(selectedPeriod, c.id, s.id, selectedPeriod.allocationRepayments) +
                           topupForSub(c.id, s.id) +
                           periodCarryoverAmount(selectedPeriod, c.id, s.id);
                         const subCarryover = periodCarryoverAmount(selectedPeriod, c.id, s.id);
                         const subSpent = spentForSub(c.id, s.id) - (c.isAsset
                           ? monthT.filter((t) => t.categoryId === c.id && t.subId === s.id && isWithdrawTx(t)).reduce((sum, t) => sum + Number(t.amount), 0)
                           : 0);
-                        const subRemaining = subAlloc - subSpent;
+                        const subRemaining = capSubAllocationRemaining(
+                          c,
+                          s.id,
+                          allocated - spent,
+                          (subId) => {
+                            const sub = c.subs.find((item) => item.id === subId);
+                            if (!sub) return 0;
+                            const allocation = subAllocationBase * sub.percent / 100 +
+                              periodSubAllocationAdjustment(selectedPeriod, c.id, sub.id, selectedPeriod.allocationRepayments) +
+                              topupForSub(c.id, sub.id) +
+                              periodCarryoverAmount(selectedPeriod, c.id, sub.id);
+                            const movement = spentForSub(c.id, sub.id) - (c.isAsset
+                              ? monthT.filter((t) => t.categoryId === c.id && t.subId === sub.id && isWithdrawTx(t))
+                                .reduce((sum, t) => sum + Number(t.amount), 0)
+                              : 0);
+                            return allocation - movement;
+                          }
+                        );
                         return (
                           <div key={s.id} className="text-sm">
                             <div className="flex justify-between muted mb-1">
@@ -5449,6 +5621,7 @@ function EditTransactionModal({ tx, cat, categories = [], user, transactions = [
       const lender = categories.find((category) => category.id === borrowedFromCategoryId);
       const lenderSub = lender?.subs?.find((sub) => sub.id === borrowedFromSubId);
       if (!lender || (borrowedFromSubId && !lenderSub) ||
+          (lender.subs?.length > 0 && !lenderSub) ||
           (lender.id === tx.categoryId && (!subId || !lenderSub || lenderSub.id === subId))) {
         setError("Pilih alokasi sumber pinjaman yang valid.");
         return;
@@ -5537,7 +5710,7 @@ function EditTransactionModal({ tx, cat, categories = [], user, transactions = [
               >
                 <option value="">Tidak ada pinjaman</option>
                 {lenderCategories.flatMap((category) => [
-                  ...(category.id !== tx.categoryId
+                  ...(category.id !== tx.categoryId && !category.subs?.length
                     ? [<option key={category.id} value={JSON.stringify([category.id, null])}>{category.name}{category.isAsset ? " · aset" : ""}</option>]
                     : []),
                   ...(category.subs || [])
