@@ -1,4 +1,6 @@
 import { Component, useState, useEffect, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
+import { normalizeAllocationAmount, resolveAllocationLoanBalances } from "./allocationLoanBalance";
 import { authCallbackUrl, authRecoveryUrl, supabase } from "./lib/supabase";
 import {
   LogIn, UserPlus, ArrowRight, ArrowLeft, Check, Pencil, Plus, Trash2,
@@ -425,52 +427,31 @@ function getOutstandingAllocationLoans(user, transactions, beforeDate = null, be
       createdAt: transaction.created_at || transaction.createdAt || "",
       amount: borrowedAmount,
       type: "loan",
+      fromCategoryId: transaction.categoryId,
+      toCategoryId: transaction.borrowedFromCategoryId,
+      fromSubId,
+      toSubId,
+      tieBreaker: transaction.id || key,
     });
   });
   getSalaryPeriods(user)
     .filter((period) => period.id !== excludedRepaymentPeriodId && occursBeforeCutoff(period.startDate, period.createdAt))
-    .forEach((period) => (period.allocationRepayments || []).forEach((repayment) => {
+    .forEach((period) => (period.allocationRepayments || []).forEach((repayment, index) => {
       const key = allocationLoanKey(repayment.fromCategoryId, repayment.toCategoryId, repayment.fromSubId, repayment.toSubId);
       events.push({
         key,
         date: period.startDate,
         createdAt: period.createdAt || "",
-        amount: Number(repayment.amount || 0),
+        amount: repayment.amount,
         type: "repayment",
+        fromCategoryId: repayment.fromCategoryId,
+        toCategoryId: repayment.toCategoryId,
+        fromSubId: repayment.fromSubId || null,
+        toSubId: repayment.toSubId || null,
+        tieBreaker: `${period.id}-${index}`,
       });
     }));
-  events.sort((a, b) => a.date.localeCompare(b.date) ||
-    (timestampValue(a.createdAt) ?? 0) - (timestampValue(b.createdAt) ?? 0) ||
-    Number(a.type !== "repayment") - Number(b.type !== "repayment"));
-  const balances = new Map();
-  const loanOrder = [];
-  events.forEach((event) => {
-    if (event.type === "loan") {
-      if (!balances.has(event.key)) loanOrder.push(event.key);
-      balances.set(event.key, (balances.get(event.key) || 0) + event.amount);
-      return;
-    }
-    const [fromCategoryId, toCategoryId, fromSubId = null, toSubId = null] = JSON.parse(event.key);
-    const repaymentKeys = fromSubId || toSubId
-      ? [event.key]
-      : [
-          event.key,
-          ...loanOrder.filter((key) => {
-            const [loanFromCategoryId, loanToCategoryId] = JSON.parse(key);
-            return key !== event.key &&
-              loanFromCategoryId === fromCategoryId &&
-              loanToCategoryId === toCategoryId;
-          }),
-        ];
-    let remainingRepayment = Math.max(0, event.amount);
-    repaymentKeys.forEach((key) => {
-      if (!(remainingRepayment > 0)) return;
-      const outstanding = balances.get(key) || 0;
-      const applied = Math.min(outstanding, remainingRepayment);
-      balances.set(key, outstanding - applied);
-      remainingRepayment -= applied;
-    });
-  });
+  const balances = resolveAllocationLoanBalances(events);
   return [...balances.entries()].filter(([, amount]) => amount > 0).map(([key, amount]) => {
     const [fromCategoryId, toCategoryId, fromSubId = null, toSubId = null] = JSON.parse(key);
     return { key, fromCategoryId, toCategoryId, fromSubId, toSubId, amount };
@@ -496,11 +477,15 @@ function allocationRepaymentsForPeriod(user, transactions, period) {
         repayment.fromSubId,
         repayment.toSubId
       );
-      balances.set(key, Math.max(0, (balances.get(key) || 0) - Number(repayment.amount || 0)));
-      resolved.push(repayment);
+      const balance = balances.get(key) || 0;
+      const amount = Math.min(balance, normalizeAllocationAmount(repayment.amount));
+      if (amount > 0) {
+        balances.set(key, balance - amount);
+        resolved.push({ ...repayment, amount });
+      }
       return;
     }
-    let remaining = Math.max(0, Number(repayment.amount || 0));
+    let remaining = normalizeAllocationAmount(repayment.amount);
     const matchingLoans = outstanding.filter((loan) =>
       loan.fromCategoryId === repayment.fromCategoryId &&
       loan.toCategoryId === repayment.toCategoryId
@@ -522,7 +507,6 @@ function allocationRepaymentsForPeriod(user, transactions, period) {
         remaining -= applied;
       }
     });
-    if (remaining > 0) resolved.push({ ...repayment, amount: remaining });
   });
   return resolved;
 }
@@ -2368,13 +2352,13 @@ function AllocationEditor({ user, onSave, onCancel, onLogout, initialCategories,
     onSave(categories);
   };
 
-  return (
-    <div className={embedded ? "modal-overlay anim-fade" : "min-h-screen"} onClick={embedded ? onCancel : undefined}>
-      <div className={embedded ? "card p-4 anim-pop allocation-editor-modal" : ""} style={embedded ? { maxWidth: 760, width: "100%" } : undefined} onClick={embedded ? (event) => event.stopPropagation() : undefined}>
+  const editor = (
+    <div className={embedded ? "modal-overlay anim-fade salary-allocation-editor-overlay" : "min-h-screen"} onClick={embedded ? onCancel : undefined}>
+      <div className={embedded ? "card p-4 anim-pop allocation-editor-modal salary-allocation-editor-modal" : ""} style={embedded ? { maxWidth: 960, width: "100%" } : undefined} onClick={embedded ? (event) => event.stopPropagation() : undefined}>
       {!embedded && <TopBar name={user.name} onLogout={onLogout} right={
         <button className="btn-ghost text-sm flex items-center gap-2" onClick={onCancel}><ArrowLeft size={14} /> Batal</button>
       } />}
-      <div className={`p-4 md:p-8 max-w-3xl mx-auto flex flex-col gap-6 anim-fade-up${embedded ? "" : ""}`}>
+      <div className={`allocation-editor-content p-4 md:p-8 ${embedded ? "max-w-none" : "max-w-3xl"} mx-auto flex flex-col gap-6 anim-fade-up`}>
         <div>
           <h1 className="display" style={{ fontSize: 22, fontWeight: 700 }}>Edit alokasi & sub-alokasi</h1>
           <p className="muted text-sm mt-1">
@@ -2392,13 +2376,13 @@ function AllocationEditor({ user, onSave, onCancel, onLogout, initialCategories,
           </div>
           <ProgressBar percent={total} color={isHundred(total) ? "var(--teal)" : "var(--gold)"} />
 
-          <div className="flex flex-col gap-2 mt-4">
+          <div className="flex flex-col gap-2 mt-4 allocation-category-list">
             {categories.map((c, i) => {
               const expanded = expandedId === c.id;
               const catAmount = income * c.percent / 100;
               const subTotal = c.subs.reduce((s, x) => s + Number(x.percent || 0), 0);
               return (
-                <div key={c.id} className="card2 p-3 anim-fade-up">
+                <div key={c.id} className="card2 p-3 anim-fade-up allocation-category-card">
                   <div className="flex items-center justify-between gap-2 main-allocation-row">
                     <button
                       className="flex items-center gap-2 text-sm flex-1"
@@ -2429,22 +2413,22 @@ function AllocationEditor({ user, onSave, onCancel, onLogout, initialCategories,
                   </label>
 
                   {expanded && (
-                    <div className="mt-3 pl-4 flex flex-col gap-2 anim-fade-up" style={{ borderLeft: "2px solid var(--border)" }}>
-                      <div className="flex items-center justify-between">
+                    <div className="mt-3 pl-4 flex flex-col gap-2 anim-fade-up sub-allocation-editor" style={{ borderLeft: "2px solid var(--border)" }}>
+                      <div className="flex items-center justify-between sub-allocation-summary">
                         <p className="muted text-xs">Sub-alokasi dari {c.name} (opsional)</p>
                         <span className="text-xs tabular" style={{ color: c.subs.length === 0 || isHundred(subTotal) ? "var(--muted)" : "var(--rose)" }}>
                           Total sub {fmtPercent(subTotal)}% · Sisa {fmtPercent(100 - subTotal)}% ({rupiah(catAmount * (100 - subTotal) / 100)})
                         </span>
                       </div>
                       {c.subs.map((s) => (
-                        <div key={s.id} className="flex items-center justify-between gap-2 sub-allocation-row">
+                        <div key={s.id} className="flex items-center justify-between gap-2 sub-allocation-row salary-sub-allocation-row">
                           <input className="flex-1 sub-allocation-name" value={s.name} onChange={(e) => updateSubName(c.id, s.id, e.target.value)} />
                           <PercentOrAmountInput percent={s.percent} base={catAmount} onChangePercent={(p) => updateSubPercent(c.id, s.id, p)} />
                           <span className="sub-allocation-amount tabular text-xs muted" style={{ minWidth: 90, textAlign: "right" }}>{rupiah(catAmount * s.percent / 100)}</span>
                           <button className="icon-btn" onClick={() => removeSub(c.id, s.id)}><Trash2 size={14} color="var(--rose)" /></button>
                         </div>
                       ))}
-                      <div className="flex gap-2 mt-1 flex-wrap">
+                      <div className="flex gap-2 mt-1 flex-wrap salary-sub-allocation-add">
                         <input style={{ flex: 1, minWidth: 140 }} placeholder="Tambah sub baru" value={newSubName} onChange={(e) => setNewSubName(e.target.value)} onKeyDown={onEnter(() => addSub(c))} />
                         <NewValueInput value={newSubPercent} onValue={setNewSubPercent} mode={newSubMode} onMode={setNewSubMode} />
                         <button className="btn-ghost" onClick={() => addSub(c)}><Plus size={16} /></button>
@@ -2479,6 +2463,11 @@ function AllocationEditor({ user, onSave, onCancel, onLogout, initialCategories,
       </div>
     </div>
   );
+
+  if (!embedded) return editor;
+  const appRoot = document.querySelector(".mmp-app");
+  if (!appRoot) throw new Error("Application root not found for allocation editor.");
+  return createPortal(editor, appRoot);
 }
 
 /* ---------- Dashboard ---------- */
@@ -3489,19 +3478,19 @@ class AddMoneyPageBoundary extends Component {
 function defaultAllocationRepayments(loans, categories, salary) {
   const categoryCapacity = new Map(categories.map((category) => [
     category.id,
-    Math.max(0, salary * Number(category.percent || 0) / 100),
+    Math.floor(Math.max(0, salary * Number(category.percent || 0) / 100)),
   ]));
   const subCapacity = new Map(categories.flatMap((category) =>
     (category.subs || []).map((sub) => [
       JSON.stringify([category.id, sub.id]),
-      Math.max(0, salary * Number(category.percent || 0) / 100 * Number(sub.percent || 0) / 100),
+      Math.floor(Math.max(0, salary * Number(category.percent || 0) / 100 * Number(sub.percent || 0) / 100)),
     ])
   ));
   return Object.fromEntries(loans.map((loan) => {
     const remainingCategory = categoryCapacity.get(loan.fromCategoryId) || 0;
     const subKey = JSON.stringify([loan.fromCategoryId, loan.fromSubId]);
     const remainingSub = loan.fromSubId ? (subCapacity.get(subKey) || 0) : remainingCategory;
-    const amount = Math.max(0, Math.min(Number(loan.amount || 0), remainingCategory, remainingSub));
+    const amount = Math.max(0, Math.min(normalizeAllocationAmount(loan.amount), remainingCategory, remainingSub));
     categoryCapacity.set(loan.fromCategoryId, remainingCategory - amount);
     if (loan.fromSubId) subCapacity.set(subKey, remainingSub - amount);
     return [loan.key, String(amount)];
@@ -3662,8 +3651,8 @@ function AddMoneyPage({ user, transactions, onBack, onLogout, onSubmit, onSubmit
       for (const loan of loansAtSubmission) {
         const repaymentAmount = Number(repaymentAmounts[loan.key] ?? defaultRepaymentsAtSubmission[loan.key] ?? 0);
         const borrowerName = allocationSourceName(user, loan.fromCategoryId, loan.fromSubId);
-        if (!Number.isFinite(repaymentAmount) || repaymentAmount < 0 || repaymentAmount > loan.amount) {
-          setSalaryError(`Nominal penyesuaian pinjaman ${borrowerName} tidak valid.`);
+        if (!Number.isSafeInteger(repaymentAmount) || repaymentAmount < 0 || repaymentAmount > loan.amount) {
+          setSalaryError(`Nominal penyesuaian pinjaman ${borrowerName} harus berupa rupiah bulat dan tidak melebihi sisa pinjaman.`);
           return;
         }
         const borrowerCategory = salaryCategories.find((category) => category.id === loan.fromCategoryId);
@@ -3891,9 +3880,9 @@ function AddMoneyPage({ user, transactions, onBack, onLogout, onSubmit, onSubmit
                     const lenderSub = lender?.subs?.find((sub) => sub.id === loan.toSubId);
                     const borrowerAllocation = borrower ? (Number(salaryAmount) || 0) * borrower.percent / 100 : 0;
                     const maxRepayment = borrower
-                      ? Math.min(loan.amount, loan.fromSubId && borrowerSub
+                      ? Math.floor(Math.min(loan.amount, loan.fromSubId && borrowerSub
                         ? borrowerAllocation * borrowerSub.percent / 100
-                        : borrowerAllocation)
+                        : borrowerAllocation))
                       : 0;
                     return (
                       <div key={loan.key} className="flex items-center justify-between gap-3 flex-wrap">
@@ -3906,6 +3895,7 @@ function AddMoneyPage({ user, transactions, onBack, onLogout, onSubmit, onSubmit
                             aria-label={`Penyesuaian pinjaman ${allocationSourceName(user, loan.fromCategoryId, loan.fromSubId)} ke ${allocationSourceName(user, loan.toCategoryId, loan.toSubId)}`}
                             type="number"
                             min="0"
+                            step="1"
                             max={maxRepayment}
                             value={repaymentAmounts[loan.key] ?? defaultRepayments[loan.key] ?? "0"}
                             onChange={(event) => {
@@ -7196,6 +7186,67 @@ const STYLE = `
   background:var(--border);
   border-radius:9999px;
 }
+.mmp-app .salary-allocation-editor-overlay{
+  z-index:1100;
+  padding:clamp(16px, 2vw, 24px);
+}
+.mmp-app .salary-allocation-editor-modal{
+  width:100%;
+  max-width:960px;
+}
+.mmp-app .salary-allocation-editor-modal .allocation-editor-content{
+  width:100%;
+  max-width:none;
+  padding:8px 16px 16px;
+  gap:20px;
+}
+.mmp-app .salary-allocation-editor-modal .allocation-category-list{ gap:12px; }
+.mmp-app .salary-allocation-editor-modal .allocation-category-card{ padding:16px; }
+.mmp-app .salary-allocation-editor-modal .main-allocation-row{ gap:14px; }
+.mmp-app .salary-allocation-editor-modal .sub-allocation-editor{
+  margin-left:4px;
+  padding:14px 16px;
+  border:1px solid var(--border) !important;
+  border-left:1px solid var(--border) !important;
+  border-radius:12px;
+  background:var(--surface2);
+}
+.mmp-app .salary-allocation-editor-modal .sub-allocation-summary{
+  align-items:flex-start;
+  gap:8px 16px;
+  flex-wrap:wrap;
+}
+.mmp-app .salary-allocation-editor-modal .salary-sub-allocation-row{
+  display:grid;
+  grid-template-columns:minmax(0, 1fr) 180px minmax(120px, auto) auto;
+  align-items:center;
+  gap:12px;
+  padding:8px 10px;
+  border:1px solid var(--border);
+  border-radius:10px;
+  background:var(--surface);
+}
+.mmp-app .salary-allocation-editor-modal .salary-sub-allocation-row > .sub-allocation-name{
+  width:100%;
+  min-width:0;
+}
+.mmp-app .salary-allocation-editor-modal .salary-sub-allocation-row > .allocation-value-input{
+  width:180px;
+  flex:none;
+}
+.mmp-app .salary-allocation-editor-modal .salary-sub-allocation-row > .allocation-value-input > input{
+  width:82px;
+}
+.mmp-app .salary-allocation-editor-modal .salary-sub-allocation-row > .sub-allocation-amount{
+  min-width:120px;
+  white-space:nowrap;
+}
+.mmp-app .salary-allocation-editor-modal .salary-sub-allocation-add{
+  align-items:center;
+  padding:10px;
+  border:1px dashed var(--border);
+  border-radius:10px;
+}
 .mmp-app .salary-target-list{
   display:grid;
   grid-template-columns:repeat(2, minmax(0, 1fr));
@@ -7322,6 +7373,33 @@ const STYLE = `
   .mmp-app .modal-overlay > .add-money-modal,
   .mmp-app .modal-overlay > .allocation-editor-modal{
     max-height:calc(100dvh - 24px);
+  }
+  .mmp-app .salary-allocation-editor-modal .allocation-editor-content{
+    padding:0;
+    gap:14px;
+  }
+  .mmp-app .salary-allocation-editor-modal .allocation-category-card{ padding:12px; }
+  .mmp-app .salary-allocation-editor-modal .sub-allocation-editor{
+    margin-left:0;
+    padding:10px;
+  }
+  .mmp-app .salary-allocation-editor-modal .salary-sub-allocation-row{
+    grid-template-columns:minmax(0, 1fr) auto auto;
+    gap:8px;
+    padding:8px;
+  }
+  .mmp-app .salary-allocation-editor-modal .salary-sub-allocation-row > .sub-allocation-name{
+    grid-column:1 / -1;
+  }
+  .mmp-app .salary-allocation-editor-modal .salary-sub-allocation-row > .allocation-value-input{
+    width:auto;
+  }
+  .mmp-app .salary-allocation-editor-modal .salary-sub-allocation-row > .allocation-value-input > input{
+    width:clamp(72px, 22vw, 104px);
+  }
+  .mmp-app .salary-allocation-editor-modal .salary-sub-allocation-row > .sub-allocation-amount{
+    min-width:0;
+    font-size:11px;
   }
   .mmp-app .cat-card{ width:100%; min-width:0; }
   .mmp-app [style*="grid-template-columns"]{ grid-template-columns:1fr !important; }
